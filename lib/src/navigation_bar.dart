@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart'
     hide NavigationBar, NavigationDestination;
 
@@ -239,6 +241,13 @@ class _NavigationBarState extends State<NavigationBar>
         NavigationBarStyle.flexible(theme.colorScheme, theme.textTheme);
     final indicatorColor = widget.indicatorColor ?? style.indicatorColor;
     final itemStyle = style.destinationStyle;
+    // A slot too narrow for a destination squashes it rather than overflowing:
+    // the pill's side margins give way first, then the indicator narrows.
+    double indicatorWidthFor(double slot) =>
+        math.min(style.verticalIndicatorWidth, slot);
+    double pillMarginFor(double slot) => math.min(
+        style.expandedPillHorizontalMargin,
+        (slot - indicatorWidthFor(slot)) / 2);
     return Material(
       color: widget.backgroundColor ?? style.containerColor,
       elevation: widget.elevation ?? style.elevation,
@@ -281,7 +290,7 @@ class _NavigationBarState extends State<NavigationBar>
                             minWidth: constraints.maxWidth,
                             expandedWidth: constraints.maxWidth,
                             collapsedIndicatorWidth:
-                                style.verticalIndicatorWidth,
+                                indicatorWidthFor(constraints.maxWidth),
                             collapsedIndicatorHeight:
                                 style.verticalIndicatorHeight,
                             expandedIndicatorHeight:
@@ -290,7 +299,7 @@ class _NavigationBarState extends State<NavigationBar>
                             labelTrailingSpace: style.horizontalTrailingSpace,
                             belowLabelSpacing: style.verticalIconLabelSpacing,
                             horizontalMargin:
-                                style.expandedPillHorizontalMargin,
+                                pillMarginFor(constraints.maxWidth),
                             indicatorSize: NavigationIndicatorSize.label,
                             centered: true,
                             style: itemStyle,

@@ -268,8 +268,12 @@ class _NavigationRailState extends State<NavigationRail>
   late bool _open;
   // Whether the open rail is shown as a modal overlay (vs inline).
   bool _modal = false;
-  // The modal overlay surface (scrim + expanded rail); null unless modal-open.
-  OverlayEntry? _modalEntry;
+  // The modal overlay surface (scrim + expanded rail). It is painted into the
+  // nearest Overlay but built in this rail's own subtree, so it rebuilds with
+  // the rail and inherits what the rail inherits.
+  final OverlayPortalController _modalOverlay = OverlayPortalController();
+  // Whether the modal overlay should be showing; [_syncModalOverlay] applies it.
+  bool _modalShown = false;
 
   bool get _modalOpen => _open && _modal;
 
@@ -327,7 +331,6 @@ class _NavigationRailState extends State<NavigationRail>
 
   @override
   void dispose() {
-    _hideModalOverlay();
     _disposeControllers();
     super.dispose();
   }
@@ -389,41 +392,41 @@ class _NavigationRailState extends State<NavigationRail>
   }
 
   void _rebuild() {
-    if (_modalEntry != null && !_open && _expandController.value <= 0.001) {
+    if (_modalShown && !_open && _expandController.value <= 0.001) {
       _hideModalOverlay();
     }
     setState(() {});
-    // The overlay is a separate subtree, so rebuild it too (selection + morph).
-    _modalEntry?.markNeedsBuild();
   }
 
   void _showModalOverlay() {
-    if (_modalEntry != null) return;
-    final entry = OverlayEntry(builder: _buildModalOverlay);
-    _modalEntry = entry;
-    void insert() {
-      // Bail if we were collapsed/disposed before the deferred insert ran.
-      if (!mounted || _modalEntry != entry || entry.mounted) return;
-      Overlay.of(context).insert(entry);
-    }
-
-    // Inserting an entry during build/layout (e.g. from didUpdateWidget) throws;
-    // defer to the next frame in that case, otherwise insert immediately so a
-    // user tap opens it without a frame of lag.
-    if (SchedulerBinding.instance.schedulerPhase ==
-        SchedulerPhase.persistentCallbacks) {
-      WidgetsBinding.instance.addPostFrameCallback((_) => insert());
-    } else {
-      insert();
-    }
+    if (_modalShown) return;
+    _modalShown = true;
+    _syncModalOverlay();
   }
 
   void _hideModalOverlay() {
-    final entry = _modalEntry;
-    _modalEntry = null;
-    if (entry == null) return;
-    if (entry.mounted) entry.remove();
-    entry.dispose();
+    if (!_modalShown) return;
+    _modalShown = false;
+    _syncModalOverlay();
+  }
+
+  void _syncModalOverlay() {
+    // Showing or hiding the overlay during build (e.g. from didUpdateWidget)
+    // throws; defer to the next frame in that case, otherwise apply it at once
+    // so a user tap opens it without a frame of lag.
+    if (SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _syncModalOverlay();
+      });
+      return;
+    }
+    if (_modalShown == _modalOverlay.isShowing) return;
+    if (_modalShown) {
+      _modalOverlay.show();
+    } else {
+      _modalOverlay.hide();
+    }
   }
 
   // Resolves the active style: an explicit [NavigationRail.style], else the
@@ -637,7 +640,7 @@ class _NavigationRailState extends State<NavigationRail>
     final inlineValue = _modal ? 0.0 : _expandClamped.value;
     final width = lerpDouble(minWidth, expandedWidth, inlineValue)!;
 
-    return _RailScope(
+    final rail = _RailScope(
       state: this,
       expandAnimation: _expandClamped,
       isOpen: _open,
@@ -652,7 +655,7 @@ class _NavigationRailState extends State<NavigationRail>
           bottom: false,
           child: SizedBox(
             width: width,
-            child: _modalEntry == null
+            child: !_modalShown
                 ? _railColumn(
                     style: style,
                     minWidth: minWidth,
@@ -666,6 +669,11 @@ class _NavigationRailState extends State<NavigationRail>
           ),
         ),
       ),
+    );
+    return OverlayPortal(
+      controller: _modalOverlay,
+      overlayChildBuilder: _buildModalOverlay,
+      child: rail,
     );
   }
 }

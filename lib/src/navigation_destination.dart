@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:ui' show lerpDouble;
 
 import 'package:flutter/material.dart' hide NavigationDestination;
@@ -349,10 +350,12 @@ class _NavigationDestinationState extends State<NavigationDestination> {
   bool get _fill => widget.indicatorSize == NavigationIndicatorSize.fill;
 
   // The expanded pill's width: the full content slot (fill), or a hug sized to
-  // the icon plus its label.
+  // the icon plus its label. A slot narrower than the icon box caps the hug at
+  // the slot instead of inverting the clamp.
   double _expandedPillWidth(BuildContext context, TextStyle labelStyle) {
-    final maxWidth = widget.expandedWidth - 2 * widget.horizontalMargin;
-    final iconBox = widget.collapsedIndicatorWidth;
+    final maxWidth =
+        math.max(0.0, widget.expandedWidth - 2 * widget.horizontalMargin);
+    final iconBox = math.min(widget.collapsedIndicatorWidth, maxWidth);
     if (_fill) return maxWidth;
     final painter = TextPainter(
       text: TextSpan(text: widget.label, style: labelStyle),
