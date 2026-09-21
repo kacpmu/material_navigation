@@ -1,7 +1,7 @@
 import 'dart:math' as math;
 import 'dart:ui' show lerpDouble;
 
-import 'package:flutter/material.dart' hide NavigationDestination;
+import 'package:material_ui/material_ui.dart' hide NavigationDestination;
 
 /// Defines when a destination's below-label is shown in a [NavigationBar] or
 /// [NavigationRail].
@@ -76,25 +76,42 @@ class NavigationDestination extends StatefulWidget {
   /// The [icon] and [label] are required. This describes a destination; the
   /// [NavigationBar] and [NavigationRail] supply the layout and animation
   /// themselves. For full control, use [NavigationDestination.custom].
+  ///
+  /// Placed in one of a [NavigationRail]'s slots, such as
+  /// [NavigationRail.trailing] or [NavigationRail.expandedBody], it takes the
+  /// rail's layout and style, so it lines up with the rail's own destinations.
+  /// Pass the rail's [NavigationRailHandle.expandAnimation] as
+  /// [expandAnimation] so it morphs along with them.
   const NavigationDestination({
-    Key? key,
-    VoidCallback? onTap,
-    required Widget icon,
-    Widget? selectedIcon,
-    required String label,
-    String? tooltip,
-    bool disabled = false,
-    Animation<double> expandAnimation = kAlwaysDismissedAnimation,
-  }) : this.custom(
-          key: key,
-          onTap: onTap,
-          icon: icon,
-          selectedIcon: selectedIcon,
-          label: label,
-          tooltip: tooltip,
-          disabled: disabled,
-          expandAnimation: expandAnimation,
-        );
+    super.key,
+    this.onTap,
+    required this.icon,
+    this.selectedIcon,
+    required this.label,
+    this.tooltip,
+    this.disabled = false,
+    this.expandAnimation = kAlwaysDismissedAnimation,
+  })  : centered = false,
+        selected = false,
+        labelBehavior = NavigationLabelBehavior.all,
+        indicatorSize = NavigationIndicatorSize.fill,
+        indicatorColor = null,
+        iconSize = 24,
+        minWidth = 80,
+        expandedWidth = 280,
+        collapsedIndicatorHeight = 32,
+        collapsedIndicatorWidth = 56,
+        expandedIndicatorHeight = 56,
+        belowLabelSpacing = 4,
+        besideLabelStart = 56,
+        horizontalMargin = 20,
+        itemSpace = 4,
+        collapsedMinHeight = 64,
+        expandedMinHeight = 48,
+        labelTrailingSpace = 16,
+        style = null,
+        destinationAnimation = kAlwaysDismissedAnimation,
+        _adoptsLayout = true;
 
   /// Creates a navigation destination with explicit control over its layout,
   /// indicator, spacing, and the animations that drive its morph and selection.
@@ -122,13 +139,15 @@ class NavigationDestination extends StatefulWidget {
     this.expandedIndicatorHeight = 56,
     this.belowLabelSpacing = 4,
     this.besideLabelStart = 56,
-    this.horizontalMargin = 12,
-    this.itemVerticalSpace = 6,
+    this.horizontalMargin = 20,
+    this.itemSpace = 4,
+    this.collapsedMinHeight = 64,
+    this.expandedMinHeight = 48,
     this.labelTrailingSpace = 16,
     this.style,
     this.destinationAnimation = kAlwaysDismissedAnimation,
     this.expandAnimation = kAlwaysDismissedAnimation,
-  });
+  }) : _adoptsLayout = false;
 
   /// Called when the destination is tapped.
   final VoidCallback? onTap;
@@ -163,7 +182,7 @@ class NavigationDestination extends StatefulWidget {
   /// Whether the destination is disabled.
   ///
   /// A disabled destination is not tappable and is shown dimmed. Per Material 3,
-  /// disabled content renders at [ColorScheme.onSurface] at 38% opacity.
+  /// disabled content renders at [ColorScheme.onSurfaceVariant] at 38% opacity.
   final bool disabled;
 
   /// Whether this destination is selected.
@@ -239,14 +258,28 @@ class NavigationDestination extends StatefulWidget {
   /// The horizontal breathing room reserved on each side of the extended pill
   /// within its slot.
   ///
-  /// Reserves 12dp on each side.
+  /// Reserves 20dp on each side, which keeps a rail's icons in place as it
+  /// expands.
   final double horizontalMargin;
 
   /// The vertical gap between adjacent destinations while collapsed.
   ///
   /// Shrinks to 0 as the destination expands. Ignored when [centered]. Material
-  /// 3 uses 6dp of per-item vertical space in a rail.
-  final double itemVerticalSpace;
+  /// 3 Expressive uses 4dp between rail items.
+  final double itemSpace;
+
+  /// The minimum height of the destination while collapsed.
+  ///
+  /// Eases to [expandedMinHeight] as the destination expands; the content is
+  /// centered vertically within it. Ignored when [centered]. Material 3
+  /// Expressive uses 64dp for a collapsed rail item.
+  final double collapsedMinHeight;
+
+  /// The minimum height of the destination when fully expanded.
+  ///
+  /// Ignored when [centered]. Material 3 Expressive uses 48dp for an expanded
+  /// rail item.
+  final double expandedMinHeight;
 
   /// The trailing padding after the beside-label, inside the pill.
   ///
@@ -277,6 +310,11 @@ class NavigationDestination extends StatefulWidget {
   /// animation.
   final Animation<double> expandAnimation;
 
+  // Whether this destination takes its layout and style from an enclosing
+  // [NavigationDestinationLayout] (the default constructor) rather than its own
+  // fields ([NavigationDestination.custom]).
+  final bool _adoptsLayout;
+
   @override
   State<NavigationDestination> createState() => _NavigationDestinationState();
 }
@@ -289,6 +327,11 @@ class _NavigationDestinationState extends State<NavigationDestination> {
   // The selected below-label "grows in" from its top.
   late CurvedAnimation _appearAnimation;
   final GlobalKey _indicatorKey = GlobalKey();
+  // Reported by the ink response. Only its hovered / focused / pressed states
+  // are used, to resolve the style's per-state icon theme and label style;
+  // selected and disabled come from the widget.
+  final WidgetStatesController _states = WidgetStatesController();
+  Set<WidgetState> _interaction = const {};
 
   @override
   void initState() {
@@ -303,6 +346,23 @@ class _NavigationDestinationState extends State<NavigationDestination> {
     // standalone or in a rail slot, not just in the rail/bar's own item loop.
     widget.expandAnimation.addListener(_rebuild);
     widget.destinationAnimation.addListener(_rebuild);
+    _states.addListener(_onStatesChanged);
+  }
+
+  // Rebuilds only when an interaction state changes: the ink response also
+  // reports disabled while it initializes, mid-build.
+  void _onStatesChanged() {
+    final interaction = _states.value
+        .where((state) =>
+            state == WidgetState.hovered ||
+            state == WidgetState.focused ||
+            state == WidgetState.pressed)
+        .toSet();
+    if (interaction.length == _interaction.length &&
+        interaction.containsAll(_interaction)) {
+      return;
+    }
+    setState(() => _interaction = interaction);
   }
 
   void _rebuild() {
@@ -343,76 +403,96 @@ class _NavigationDestinationState extends State<NavigationDestination> {
     widget.destinationAnimation.removeListener(_rebuild);
     _belowLabelSize.dispose();
     _appearAnimation.dispose();
+    _states.dispose();
     super.dispose();
   }
-
-  // Whether the expanded pill fills the destination width (vs hugging content).
-  bool get _fill => widget.indicatorSize == NavigationIndicatorSize.fill;
 
   // The expanded pill's width: the full content slot (fill), or a hug sized to
   // the icon plus its label. A slot narrower than the icon box caps the hug at
   // the slot instead of inverting the clamp.
-  double _expandedPillWidth(BuildContext context, TextStyle labelStyle) {
-    final maxWidth =
-        math.max(0.0, widget.expandedWidth - 2 * widget.horizontalMargin);
-    final iconBox = math.min(widget.collapsedIndicatorWidth, maxWidth);
-    if (_fill) return maxWidth;
+  double _expandedPillWidth(
+      BuildContext context, NavigationDestination w, TextStyle labelStyle) {
+    final fill = w.indicatorSize == NavigationIndicatorSize.fill;
+    final maxWidth = math.max(0.0, w.expandedWidth - 2 * w.horizontalMargin);
+    final iconBox = math.min(w.collapsedIndicatorWidth, maxWidth);
+    if (fill) return maxWidth;
     final painter = TextPainter(
-      text: TextSpan(text: widget.label, style: labelStyle),
+      text: TextSpan(text: w.label, style: labelStyle),
       maxLines: 1,
       textDirection: Directionality.of(context),
       textScaler: MediaQuery.textScalerOf(context),
     )..layout();
-    return (widget.besideLabelStart + painter.width + widget.labelTrailingSpace)
+    return (w.besideLabelStart + painter.width + w.labelTrailingSpace)
         .clamp(iconBox, maxWidth);
   }
 
   @override
   Widget build(BuildContext context) {
+    // In a rail slot, the plain constructor takes the rail's layout and style.
+    final w = widget._adoptsLayout
+        ? NavigationDestinationLayout.maybeOf(context)?.applyTo(widget) ??
+            widget
+        : widget;
+    final fill = w.indicatorSize == NavigationIndicatorSize.fill;
     final theme = Theme.of(context);
     final colors = theme.colorScheme;
-    final indicatorColor = widget.indicatorColor ?? colors.secondaryContainer;
-    final disabled = widget.disabled;
-    final extend = widget.expandAnimation.value;
-    final centered = widget.centered;
+    final style = w.style;
+    final indicatorColor = style?.useIndicator == false
+        ? Colors.transparent
+        : (w.indicatorColor ?? colors.secondaryContainer);
+    final indicatorShape = style?.indicatorShape ?? const StadiumBorder();
+    final disabled = w.disabled;
+    final extend = w.expandAnimation.value;
+    final centered = w.centered;
+    final states = <WidgetState>{
+      ..._interaction,
+      if (w.selected) WidgetState.selected,
+      if (disabled) WidgetState.disabled,
+    };
 
-    final style = widget.style;
     final disabledColor =
-        style?.disabledColor ?? colors.onSurface.withValues(alpha: 0.38);
+        style?.disabledColor ?? colors.onSurfaceVariant.withValues(alpha: 0.38);
     final iconColor = disabled
         ? disabledColor
-        : (widget.selected
+        : (w.selected
             ? (style?.activeIconColor ?? colors.onSecondaryContainer)
             : (style?.inactiveIconColor ?? colors.onSurfaceVariant));
     final labelColor = disabled
         ? disabledColor
-        : (widget.selected
+        : (w.selected
             ? (style?.activeLabelColor ?? colors.onSurface)
             : (style?.inactiveLabelColor ?? colors.onSurfaceVariant));
-    // The active label weight (e.g. 700 for the baseline variants) applies when
-    // selected. Horizontal (beside) label shares the icon color (it sits inside
-    // the pill); vertical (below) label uses the label color.
-    final activeWeight = widget.selected ? style?.activeLabelWeight : null;
+    // The horizontal (beside) label sits inside the pill, so when selected it
+    // takes the icon's color unless the style gives it its own.
+    final besideLabelColor = w.selected && !disabled
+        ? (style?.horizontalActiveLabelColor ?? iconColor)
+        : labelColor;
+    final activeWeight = w.selected ? style?.activeLabelWeight : null;
+    // Per-state overrides from the style (hovered, focused, pressed, selected,
+    // disabled) are merged over the resolved defaults.
+    final stateLabelStyle = style?.labelTextStyle?.resolve(states);
     final besideLabelStyle =
         (style?.horizontalLabelStyle ?? theme.textTheme.labelLarge!)
-            .copyWith(color: iconColor, fontWeight: activeWeight);
+            .copyWith(color: besideLabelColor, fontWeight: activeWeight)
+            .merge(stateLabelStyle);
     final belowLabelStyle =
         (style?.verticalLabelStyle ?? theme.textTheme.labelMedium!)
-            .copyWith(color: labelColor, fontWeight: activeWeight);
+            .copyWith(color: labelColor, fontWeight: activeWeight)
+            .merge(stateLabelStyle);
 
     final icon = IconTheme.merge(
-      data: IconThemeData(size: widget.iconSize, color: iconColor),
-      child:
-          widget.selected ? (widget.selectedIcon ?? widget.icon) : widget.icon,
+      data: IconThemeData(size: w.iconSize, color: iconColor)
+          .merge(style?.iconTheme?.resolve(states)),
+      child: w.selected ? (w.selectedIcon ?? w.icon) : w.icon,
     );
     final label = Text(
-      widget.label,
+      w.label,
       maxLines: 1,
       overflow: TextOverflow.clip,
       style: besideLabelStyle,
     );
     final belowLabelText = Text(
-      widget.label,
+      w.label,
       maxLines: 1,
       overflow: TextOverflow.clip,
       textAlign: TextAlign.center,
@@ -420,28 +500,25 @@ class _NavigationDestinationState extends State<NavigationDestination> {
     );
 
     // The pill grows from 56×32 (around the icon) to its expanded form.
-    final indicatorWidth = lerpDouble(widget.collapsedIndicatorWidth,
-        _expandedPillWidth(context, besideLabelStyle), extend)!;
-    final indicatorHeight = lerpDouble(widget.collapsedIndicatorHeight,
-        widget.expandedIndicatorHeight, extend)!;
+    final indicatorWidth = lerpDouble(w.collapsedIndicatorWidth,
+        _expandedPillWidth(context, w, besideLabelStyle), extend)!;
+    final indicatorHeight = lerpDouble(
+        w.collapsedIndicatorHeight, w.expandedIndicatorHeight, extend)!;
 
     // Centered (bar) keeps the pill centered; a non-fill (hug) rail pill is
     // left-anchored so icons stay aligned across destinations.
-    final collapsedLeadingInset =
-        (widget.minWidth - widget.collapsedIndicatorWidth) / 2;
-    final alignX = centered ? 0.0 : (_fill ? 0.0 : -1.0);
+    final collapsedLeadingInset = (w.minWidth - w.collapsedIndicatorWidth) / 2;
+    final alignX = centered ? 0.0 : (fill ? 0.0 : -1.0);
     final startInset = centered
         ? 0.0
-        : (_fill
+        : (fill
             ? 0.0
-            : lerpDouble(
-                collapsedLeadingInset, widget.horizontalMargin, extend)!);
-    final contentWidth =
-        lerpDouble(widget.minWidth, widget.expandedWidth, extend)!;
+            : lerpDouble(collapsedLeadingInset, w.horizontalMargin, extend)!);
+    final contentWidth = lerpDouble(w.minWidth, w.expandedWidth, extend)!;
     // The below-label box: a fixed collapsed-width box pinned at the rail's
     // start (no drift as the rail morphs), or full-width + centered for the bar
     // (whose slot width is fixed, so centring can't drift).
-    final belowLabelWidth = centered ? double.infinity : widget.minWidth;
+    final belowLabelWidth = centered ? double.infinity : w.minWidth;
 
     // The beside (extended) label fades in with the morph. It sits on TOP of the
     // pill (Stack) and is never clipped to it, so collapsing fades the whole
@@ -450,17 +527,16 @@ class _NavigationDestinationState extends State<NavigationDestination> {
         const Interval(0.3, 0.7).transform(extend.clamp(0.0, 1.0));
     final belowLabelFade =
         _belowLabelSize.drive(CurveTween(curve: const Interval(0.75, 1.0)));
-    final selectionInterval = widget.selected
-        ? const Interval(0.25, 0.75)
-        : const Interval(0.75, 1.0);
+    final selectionInterval =
+        w.selected ? const Interval(0.25, 0.75) : const Interval(0.75, 1.0);
     final selectedBelowFade =
-        widget.destinationAnimation.drive(CurveTween(curve: selectionInterval));
+        w.destinationAnimation.drive(CurveTween(curve: selectionInterval));
 
     final belowLabelPadding =
-        EdgeInsets.fromLTRB(4, widget.belowLabelSpacing, 4, 0);
-    final Widget belowLabel = switch (widget.labelBehavior) {
-      NavigationLabelBehavior.none =>
-        SizedBox(height: widget.belowLabelSpacing),
+        (style?.labelPadding ?? const EdgeInsets.symmetric(horizontal: 4))
+            .add(EdgeInsets.only(top: w.belowLabelSpacing));
+    final Widget belowLabel = switch (w.labelBehavior) {
+      NavigationLabelBehavior.none => SizedBox(height: w.belowLabelSpacing),
       NavigationLabelBehavior.selected => SizedBox(
           width: belowLabelWidth,
           child: Align(
@@ -504,26 +580,26 @@ class _NavigationDestinationState extends State<NavigationDestination> {
                 children: [
                   NavigationIndicator(
                     key: _indicatorKey,
-                    animation: widget.destinationAnimation,
+                    animation: w.destinationAnimation,
                     color: indicatorColor,
-                    shape: const StadiumBorder(),
+                    shape: indicatorShape,
                     width: indicatorWidth,
                     height: indicatorHeight,
                   ),
                   SizedBox(
-                      width: widget.collapsedIndicatorWidth,
+                      width: w.collapsedIndicatorWidth,
                       child: Center(child: icon)),
                   // The beside (expanded) label, on TOP of the pill at a fixed
                   // start — faded by [besideLabelOpacity], never clipped to the
                   // pill, so collapsing never shears off its last letters.
                   if (besideLabelOpacity > 0)
                     PositionedDirectional(
-                      start: widget.besideLabelStart,
+                      start: w.besideLabelStart,
                       child: Opacity(
                         opacity: besideLabelOpacity.clamp(0.0, 1.0),
                         child: Padding(
                           padding: EdgeInsetsDirectional.only(
-                              end: widget.labelTrailingSpace),
+                              end: w.labelTrailingSpace),
                           child: label,
                         ),
                       ),
@@ -535,16 +611,16 @@ class _NavigationDestinationState extends State<NavigationDestination> {
           // The below (collapsed) label, collapsing as it extends.
           SizeTransition(
             sizeFactor: _belowLabelSize,
-            axisAlignment: -1,
+            alignment: AlignmentDirectional.topStart,
             child: belowLabel,
           ),
         ],
       ),
     );
 
-    final tooltip = widget.tooltip ?? widget.label;
+    final tooltip = w.tooltip ?? w.label;
     final showTooltip =
-        extend < 0.5 && widget.labelBehavior == NavigationLabelBehavior.none;
+        extend < 0.5 && w.labelBehavior == NavigationLabelBehavior.none;
 
     // Cap the content at its own [contentWidth] rather than letting it stretch
     // to fill a wider slot. Otherwise — in a slot wider than the destination
@@ -558,24 +634,38 @@ class _NavigationDestinationState extends State<NavigationDestination> {
 
     return Semantics(
       container: true,
-      selected: widget.selected,
+      selected: w.selected,
       enabled: !disabled,
       child: Padding(
         // A gap between destinations when collapsed; flush when expanded (rail).
         padding: EdgeInsets.symmetric(
-            vertical: centered
-                ? 0.0
-                : lerpDouble(widget.itemVerticalSpace, 0, extend)!),
+            vertical: centered ? 0.0 : lerpDouble(w.itemSpace, 0, extend)! / 2),
         child: Material(
           type: MaterialType.transparency,
           child: _maybeTooltip(
             tooltip: showTooltip ? tooltip : null,
             child: _IndicatorInkWell(
-              onTap: disabled ? null : widget.onTap,
-              customBorder: const StadiumBorder(),
-              overlayColor: widget.style?.overlayColor,
+              onTap: disabled ? null : w.onTap,
+              customBorder: indicatorShape,
+              overlayColor: style?.overlayColor,
+              statesController: _states,
               indicatorKey: _indicatorKey,
-              child: centered ? Center(child: item) : item,
+              child: centered
+                  ? Center(child: item)
+                  // A rail item keeps its minimum height, content centered.
+                  // The minimum eases toward the expanded item's real height
+                  // (at least the expanded pill's), not just the expanded
+                  // minimum: otherwise it drops below the growing pill
+                  // mid-morph and the item shrinks, then grows back.
+                  : ConstrainedBox(
+                      constraints: BoxConstraints(
+                          minHeight: lerpDouble(
+                              w.collapsedMinHeight,
+                              math.max(w.expandedMinHeight,
+                                  w.expandedIndicatorHeight),
+                              extend)!),
+                      child: Center(widthFactor: 1, child: item),
+                    ),
             ),
           ),
         ),
@@ -587,6 +677,128 @@ class _NavigationDestinationState extends State<NavigationDestination> {
       tooltip == null ? child : Tooltip(message: tooltip, child: child);
 }
 
+/// The layout and style a [NavigationRail] gives the destinations built with
+/// the plain [NavigationDestination] constructor in its slots, so they line up
+/// with the rail's own.
+///
+/// Internal to the package: not exported.
+class NavigationDestinationLayout extends InheritedWidget {
+  /// Provides [NavigationDestination.custom]'s layout arguments to plain
+  /// destinations below.
+  const NavigationDestinationLayout({
+    super.key,
+    required this.labelBehavior,
+    required this.indicatorSize,
+    required this.indicatorColor,
+    required this.iconSize,
+    required this.minWidth,
+    required this.expandedWidth,
+    required this.collapsedIndicatorHeight,
+    required this.collapsedIndicatorWidth,
+    required this.expandedIndicatorHeight,
+    required this.belowLabelSpacing,
+    required this.besideLabelStart,
+    required this.horizontalMargin,
+    required this.itemSpace,
+    required this.collapsedMinHeight,
+    required this.expandedMinHeight,
+    required this.labelTrailingSpace,
+    required this.style,
+    required super.child,
+  });
+
+  /// See [NavigationDestination.labelBehavior].
+  final NavigationLabelBehavior labelBehavior;
+
+  /// See [NavigationDestination.indicatorSize].
+  final NavigationIndicatorSize indicatorSize;
+
+  /// See [NavigationDestination.indicatorColor].
+  final Color? indicatorColor;
+
+  /// See [NavigationDestination.iconSize].
+  final double iconSize;
+
+  /// See [NavigationDestination.minWidth].
+  final double minWidth;
+
+  /// See [NavigationDestination.expandedWidth].
+  final double expandedWidth;
+
+  /// See [NavigationDestination.collapsedIndicatorHeight].
+  final double collapsedIndicatorHeight;
+
+  /// See [NavigationDestination.collapsedIndicatorWidth].
+  final double collapsedIndicatorWidth;
+
+  /// See [NavigationDestination.expandedIndicatorHeight].
+  final double expandedIndicatorHeight;
+
+  /// See [NavigationDestination.belowLabelSpacing].
+  final double belowLabelSpacing;
+
+  /// See [NavigationDestination.besideLabelStart].
+  final double besideLabelStart;
+
+  /// See [NavigationDestination.horizontalMargin].
+  final double horizontalMargin;
+
+  /// See [NavigationDestination.itemSpace].
+  final double itemSpace;
+
+  /// See [NavigationDestination.collapsedMinHeight].
+  final double collapsedMinHeight;
+
+  /// See [NavigationDestination.expandedMinHeight].
+  final double expandedMinHeight;
+
+  /// See [NavigationDestination.labelTrailingSpace].
+  final double labelTrailingSpace;
+
+  /// See [NavigationDestination.style].
+  final NavigationDestinationStyle? style;
+
+  /// The nearest layout above [context], if any.
+  static NavigationDestinationLayout? maybeOf(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<NavigationDestinationLayout>();
+
+  /// [destination] with this layout and style in place of its own.
+  NavigationDestination applyTo(NavigationDestination destination) =>
+      NavigationDestination.custom(
+        onTap: destination.onTap,
+        icon: destination.icon,
+        selectedIcon: destination.selectedIcon,
+        label: destination.label,
+        tooltip: destination.tooltip,
+        disabled: destination.disabled,
+        selected: destination.selected,
+        labelBehavior: labelBehavior,
+        indicatorSize: indicatorSize,
+        indicatorColor: indicatorColor,
+        iconSize: iconSize,
+        minWidth: minWidth,
+        expandedWidth: expandedWidth,
+        collapsedIndicatorHeight: collapsedIndicatorHeight,
+        collapsedIndicatorWidth: collapsedIndicatorWidth,
+        expandedIndicatorHeight: expandedIndicatorHeight,
+        belowLabelSpacing: belowLabelSpacing,
+        besideLabelStart: besideLabelStart,
+        horizontalMargin: horizontalMargin,
+        itemSpace: itemSpace,
+        collapsedMinHeight: collapsedMinHeight,
+        expandedMinHeight: expandedMinHeight,
+        labelTrailingSpace: labelTrailingSpace,
+        style: style,
+        destinationAnimation: destination.destinationAnimation,
+        expandAnimation: destination.expandAnimation,
+      );
+
+  // The rail rebuilds this with fresh values as it animates; its destinations
+  // rebuild on the same ticks anyway.
+  @override
+  bool updateShouldNotify(NavigationDestinationLayout oldWidget) => true;
+}
+
 /// An [InkResponse] whose splash matches the active indicator's rect, located
 /// from [indicatorKey] so it tracks the pill wherever the content sits — e.g.
 /// vertically centered within a taller bar slot.
@@ -596,6 +808,7 @@ class _IndicatorInkWell extends InkResponse {
     super.onTap,
     super.customBorder,
     super.overlayColor,
+    super.statesController,
     required this.indicatorKey,
   }) : super(
           containedInkWell: true,
@@ -649,10 +862,16 @@ class NavigationDestinationStyle {
     this.disabledColor,
     this.activeLabelColor,
     this.inactiveLabelColor,
+    this.horizontalActiveLabelColor,
     this.activeLabelWeight,
     this.verticalLabelStyle,
     this.horizontalLabelStyle,
+    this.labelPadding,
+    this.indicatorShape,
+    this.useIndicator,
     this.overlayColor,
+    this.iconTheme,
+    this.labelTextStyle,
   });
 
   /// The icon color when the destination is selected.
@@ -669,14 +888,13 @@ class NavigationDestinationStyle {
 
   /// The icon and label color when the destination is disabled.
   ///
-  /// When null, Material 3 disabled content uses [ColorScheme.onSurface] at 38%
-  /// opacity.
+  /// When null, Material 3 disabled content uses
+  /// [ColorScheme.onSurfaceVariant] at 38% opacity.
   final Color? disabledColor;
 
   /// The below-label color when the destination is selected.
   ///
-  /// When null, the active label uses [ColorScheme.secondary] in Material 3
-  /// Expressive and [ColorScheme.onSurface] in the baseline variants.
+  /// When null, [ColorScheme.onSurface] is used.
   final Color? activeLabelColor;
 
   /// The label color when the destination is unselected.
@@ -685,10 +903,15 @@ class NavigationDestinationStyle {
   /// is used.
   final Color? inactiveLabelColor;
 
+  /// The beside-label color when the destination is selected.
+  ///
+  /// The beside label sits inside the active indicator, so when null it takes
+  /// the selected icon's color, as Material 3 Expressive does.
+  final Color? horizontalActiveLabelColor;
+
   /// The label font weight applied when the destination is selected.
   ///
-  /// The baseline variants use [FontWeight.w700]; the flexible and expressive
-  /// variants use [FontWeight.w500].
+  /// When null, the selected label keeps its text style's weight.
   final FontWeight? activeLabelWeight;
 
   /// The text style of the below-label (icon above text).
@@ -699,14 +922,41 @@ class NavigationDestinationStyle {
 
   /// The text style of the beside-label (icon next to text).
   ///
-  /// When null, this is [TextTheme.labelMedium] in a bar and
-  /// [TextTheme.labelLarge] in a rail.
+  /// When null, [TextTheme.labelLarge] is used.
   final TextStyle? horizontalLabelStyle;
+
+  /// The padding around the below-label, added to the gap between it and the
+  /// active indicator.
+  ///
+  /// When null, 4dp on each side.
+  final EdgeInsetsGeometry? labelPadding;
+
+  /// The shape of the active indicator and of the ink drawn over it.
+  ///
+  /// When null, a [StadiumBorder] (the Material 3 full-rounding pill).
+  final ShapeBorder? indicatorShape;
+
+  /// Whether the active indicator is drawn behind the selected destination.
+  ///
+  /// When null, it is.
+  final bool? useIndicator;
 
   /// The ink state-layer color for hover, focus and pressed states.
   ///
   /// Resolved per [WidgetState]; see [overlayFor] for a spec-conformant builder.
   final WidgetStateProperty<Color?>? overlayColor;
+
+  /// Per-state icon theme, merged over the icon's resolved size and color.
+  ///
+  /// Resolved against the destination's [WidgetState]s: [WidgetState.selected],
+  /// [WidgetState.disabled], [WidgetState.hovered], [WidgetState.focused] and
+  /// [WidgetState.pressed].
+  final WidgetStateProperty<IconThemeData?>? iconTheme;
+
+  /// Per-state label text style, merged over both labels' resolved styles.
+  ///
+  /// Resolved against the same [WidgetState]s as [iconTheme].
+  final WidgetStateProperty<TextStyle?>? labelTextStyle;
 
   /// Builds a Material 3 state-layer [overlayColor] tinted with [color].
   ///

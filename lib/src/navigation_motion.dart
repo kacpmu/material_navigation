@@ -1,5 +1,5 @@
-import 'package:flutter/material.dart';
 import 'package:flutter/physics.dart';
+import 'package:flutter/widgets.dart';
 
 /// The motion that drives a navigation component between its two layouts.
 ///
@@ -27,12 +27,28 @@ sealed class NavigationMotion {
 
   /// Material 3 Expressive motion, driven by a spring simulation.
   ///
-  /// When [spring] is omitted, the Material 3 Expressive "spatial" spring drives
-  /// the transition: an underdamped spring (~0.7 damping ratio) that overshoots
-  /// a little before settling, carrying gesture velocity through interruptions.
-  /// Pass a custom [SpringDescription] for a softer or bouncier feel.
+  /// When [spring] is omitted, the Material 3 Expressive default spatial spring
+  /// ([defaultSpatial]) drives the transition: an underdamped spring that
+  /// overshoots a little before settling, carrying gesture velocity through
+  /// interruptions. Pass [fastSpatial], or a custom [SpringDescription], for a
+  /// quicker, softer or bouncier feel.
   const factory NavigationMotion.expressive({SpringDescription spring}) =
       _SpringMotion;
+
+  /// The Material 3 Expressive default spatial spring: stiffness 380, damping
+  /// ratio 0.8.
+  ///
+  /// Used for movement across a component, such as the inline rail expanding
+  /// and the bar's item morph.
+  static const SpringDescription defaultSpatial =
+      SpringDescription(mass: 1, stiffness: 380, damping: 31.19);
+
+  /// The Material 3 Expressive fast spatial spring: stiffness 800, damping ratio
+  /// 0.6.
+  ///
+  /// Used for small or quick movements, such as the modal rail sliding in.
+  static const SpringDescription fastSpatial =
+      SpringDescription(mass: 1, stiffness: 800, damping: 33.94);
 
   /// The non-expressive motion: a fixed [duration] eased by an emphasized
   /// [curve].
@@ -92,15 +108,9 @@ class _CurveMotion extends NavigationMotion {
 
 // Material 3 Expressive physics motion: a [spring] simulation.
 class _SpringMotion extends NavigationMotion {
-  const _SpringMotion({this.spring = _spatial});
+  const _SpringMotion({this.spring = NavigationMotion.defaultSpatial});
 
   final SpringDescription spring;
-
-  // M3 Expressive "spatial" spring — mass 1, stiffness 400, with damping set for
-  // a ~0.7 damping ratio (`damping = ratio * 2 * sqrt(mass * stiffness)`), a
-  // lively deceleration that overshoots a little before settling.
-  static const SpringDescription _spatial =
-      SpringDescription(mass: 1, stiffness: 400, damping: 28);
 
   @override
   AnimationController createController(TickerProvider vsync, double value,

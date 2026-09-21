@@ -2,16 +2,24 @@ name: material_navigation
 description: >-
   Material 3 Expressive navigation for Flutter: a flexible navigation bar and a
   navigation rail that expands in place or as a modal, with spring motion.
-version: 0.0.2
+version: 0.1.0
 repository: https://github.com/kacpmu/material_navigation
 
+topics:
+  - navigation
+  - material
+  - expressive
+  - ui
+  - widgets
+
 environment:
-  sdk: ^3.11.4
-  flutter: ">=1.17.0"
+  sdk: ^3.12.0
+  flutter: ">=3.44.0"
 
 dependencies:
   flutter:
     sdk: flutter
+  material_ui: ^1.2.0
 
 dev_dependencies:
   flutter_test:
