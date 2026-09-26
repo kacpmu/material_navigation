@@ -1,10 +1,13 @@
 import 'dart:math' as math;
 import 'dart:ui' show lerpDouble;
 
+import 'package:flutter/semantics.dart' show SemanticsRole;
+
 import 'package:flutter/foundation.dart';
 import 'package:material_ui/material_ui.dart'
     hide NavigationBar, NavigationDestination;
 
+import 'label_metrics.dart';
 import 'navigation_destination.dart';
 import 'navigation_motion.dart';
 
@@ -85,12 +88,13 @@ class NavigationBar extends StatefulWidget {
   /// [motion].
   final Axis layoutDirection;
 
-  /// Whether below-labels are shown for all destinations, only the selected one,
-  /// or never.
+  /// Whether labels are shown for all destinations, only the selected one, or
+  /// never.
   ///
-  /// Shows every destination's below-label ([NavigationLabelBehavior.all])
-  /// unless set otherwise. In the horizontal layout every destination shows its
-  /// label beside the icon regardless of this value.
+  /// Shows every destination's label ([NavigationLabelBehavior.all]) unless
+  /// set otherwise. Applies in both layouts: below the icon in the vertical
+  /// one, and beside it in the horizontal one, where a hidden label leaves the
+  /// active indicator around the icon alone.
   final NavigationLabelBehavior labelBehavior;
 
   /// The token bundle that drives the bar's geometry, colors, and text styles.
@@ -112,7 +116,9 @@ class NavigationBar extends StatefulWidget {
   /// The height of the bar's container.
   ///
   /// Falls back to [NavigationBarStyle.height] (Material 3: flexible 64dp,
-  /// baseline 80dp).
+  /// baseline 80dp). A minimum rather than a fixed value: the bar grows when
+  /// its destinations need more room, as at large text scales. Cap that growth
+  /// with [NavigationBarStyle.maxLabelScale].
   final double? height;
 
   /// The color of the bar's container.
@@ -145,6 +151,14 @@ class _NavigationBarState extends State<NavigationBar>
   late List<Animation<double>> _destAnimations;
   // 0 = vertical layout, 1 = horizontal layout.
   late AnimationController _morphController;
+  // The label behavior a change eases the bar's height away from, in step
+  // with the destinations easing their below-labels.
+  NavigationLabelBehavior? _fromLabelBehavior;
+  late final AnimationController _labelBehaviorChange = AnimationController(
+    vsync: this,
+    duration: navigationLabelBehaviorDuration,
+    value: 1,
+  )..addListener(_rebuild);
 
   double get _morphTarget =>
       widget.layoutDirection == Axis.horizontal ? 1.0 : 0.0;
@@ -152,89 +166,196 @@ class _NavigationBarState extends State<NavigationBar>
   @override
   void initState() {
     super.initState();
-    _initControllers();
+    _initDestinationControllers();
+    _morphController = widget.motion.createController(this, _morphTarget)
+      ..addListener(_rebuild);
   }
 
   @override
   void didUpdateWidget(NavigationBar oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (widget.motion != oldWidget.motion) {
-      // Re-create the morph controller under the new motion, keeping progress.
-      final value = _morphController.value;
-      _morphController.dispose();
-      _morphController = widget.motion.createController(this, value)
-        ..addListener(_rebuild);
-    }
     if (widget.layoutDirection != oldWidget.layoutDirection) {
       widget.motion.animateTo(_morphController, _morphTarget);
     }
+    if (widget.labelBehavior != oldWidget.labelBehavior) {
+      _fromLabelBehavior = oldWidget.labelBehavior;
+      _labelBehaviorChange.forward(from: 0);
+    }
     if (widget.destinations.length != oldWidget.destinations.length) {
-      _disposeControllers();
-      _initControllers();
+      // The morph controller is independent of the destination list, so the
+      // bar keeps its layout progress across a change in destinations.
+      _disposeDestinationControllers();
+      _initDestinationControllers();
       return;
     }
     if (widget.selectedIndex != oldWidget.selectedIndex) {
-      if (oldWidget.selectedIndex >= 0 &&
-          oldWidget.selectedIndex < _destControllers.length) {
-        _destControllers[oldWidget.selectedIndex].reverse();
-      }
-      _destControllers[widget.selectedIndex].forward();
+      _selectionControllerAt(oldWidget.selectedIndex)?.reverse();
+      _selectionControllerAt(widget.selectedIndex)?.forward();
     }
   }
 
   @override
   void dispose() {
-    _disposeControllers();
+    _disposeDestinationControllers();
+    _morphController.dispose();
+    _labelBehaviorChange.dispose();
     super.dispose();
   }
 
-  void _initControllers() {
+  // Null rather than a range error when [index] is out of bounds, so an
+  // out-of-range selectedIndex shows nothing selected instead of crashing. The
+  // constructor cannot check the range while it stays const.
+  AnimationController? _selectionControllerAt(int index) =>
+      index >= 0 && index < _destControllers.length
+          ? _destControllers[index]
+          : null;
+
+  void _initDestinationControllers() {
     _destControllers = List<AnimationController>.generate(
       widget.destinations.length,
+      // The destinations listen to these themselves; the bar reads no value
+      // from them, so it deliberately does not rebuild on their ticks.
       (_) => AnimationController(
         duration: const Duration(milliseconds: 200),
         vsync: this,
-      )..addListener(_rebuild),
+      ),
     );
     _destAnimations = _destControllers.map((c) => c.view).toList();
-    if (widget.selectedIndex >= 0 &&
-        widget.selectedIndex < _destControllers.length) {
-      _destControllers[widget.selectedIndex].value = 1.0;
-    }
-    _morphController = widget.motion.createController(this, _morphTarget)
-      ..addListener(_rebuild);
+    _selectionControllerAt(widget.selectedIndex)?.value = 1.0;
   }
 
-  void _disposeControllers() {
+  void _disposeDestinationControllers() {
     for (final c in _destControllers) {
       c.dispose();
     }
-    _morphController.dispose();
   }
 
   void _rebuild() => setState(() {});
 
+  // The tab-bar role needs at least one tab under it, and a tab needs a tap
+  // action, so a bar with nothing to select is left unroled.
+  Widget _asTabBar(Widget child) =>
+      widget.destinations.isEmpty || widget.onDestinationSelected == null
+          ? child
+          : Semantics(
+              role: SemanticsRole.tabBar,
+              explicitChildNodes: true,
+              container: true,
+              child: child,
+            );
+
+  // The scale labels are laid out at, honouring [NavigationBarStyle.maxLabelScale].
+  TextScaler _labelScaler(BuildContext context, NavigationBarStyle style) {
+    final scaler = MediaQuery.textScalerOf(context);
+    final max = style.maxLabelScale;
+    return max == null ? scaler : scaler.clamp(maxScaleFactor: max);
+  }
+
+  // The height the destinations need at morph progress [extend], in slots
+  // [slotWidth] wide whose beside-labels wrap at [besideWidth], at the current
+  // text scale. Material 3 grows the bar rather than clipping its labels, so
+  // this is a floor under the bar's own height rather than a value it
+  // overrides.
+  double _contentHeight(BuildContext context, NavigationBarStyle style,
+      double slotWidth, double besideWidth, double extend) {
+    final textDirection = Directionality.of(context);
+    final textScaler = _labelScaler(context, style);
+    final locale = Localizations.maybeLocaleOf(context);
+    final boldText = MediaQuery.boldTextOf(context);
+    final belowStyle =
+        style.verticalLabelStyle!.copyWith(fontWeight: style.activeLabelWeight);
+    final besideStyle = style.horizontalLabelStyle!
+        .copyWith(fontWeight: style.activeLabelWeight);
+    final maxLines = style.labelMaxLines!;
+    // The destination's own fallback when the style sets none.
+    final labelPadding =
+        style.labelPadding ?? const EdgeInsets.symmetric(horizontal: 4);
+    // Each label measured at the width it wraps to in its destination.
+    final belowWidth = math.max(0.0, slotWidth - labelPadding.horizontal);
+    var below = 0.0;
+    var beside = 0.0;
+    for (final destination in widget.destinations) {
+      below = math.max(
+          below,
+          measureLabel(destination.label,
+                  style: belowStyle,
+                  textDirection: textDirection,
+                  textScaler: textScaler,
+                  locale: locale,
+                  maxLines: maxLines,
+                  maxWidth: belowWidth,
+                  boldText: boldText)
+              .height);
+      beside = math.max(
+          beside,
+          measureLabel(destination.label,
+                  style: besideStyle,
+                  textDirection: textDirection,
+                  textScaler: textScaler,
+                  locale: locale,
+                  maxLines: maxLines,
+                  maxWidth: besideWidth,
+                  boldText: boldText)
+              .height);
+    }
+    // As a destination lays itself out: the pill, growing from its vertical
+    // to its horizontal height around a tall label, or the icon where that is
+    // taller still, above the below-label, which collapses as the bar morphs.
+    // A hidden label still reserves the gap below the pill, and the pill
+    // hugs only the icon.
+    final labelShown = _labelsShown;
+    final belowLabel = style.verticalIconLabelSpacing! +
+        labelShown * (below + labelPadding.vertical);
+    final horizontalPill = lerpDouble(
+        style.horizontalIndicatorHeight!,
+        math.max(style.horizontalIndicatorHeight!,
+            beside + style.horizontalIndicatorHeight! - style.iconSize!),
+        labelShown)!;
+    final pill =
+        lerpDouble(style.verticalIndicatorHeight!, horizontalPill, extend)!;
+    return math.max(pill, style.iconSize!) + (1 - extend) * belowLabel;
+  }
+
+  // How far the labels show, from 0 under [NavigationLabelBehavior.none] to 1
+  // otherwise, easing through a change of behavior as the destinations do.
+  // [NavigationLabelBehavior.selected] counts as shown: any destination's label
+  // shows once it is selected.
+  double get _labelsShown {
+    double shown(NavigationLabelBehavior behavior) =>
+        behavior == NavigationLabelBehavior.none ? 0 : 1;
+    return lerpDouble(
+        shown(_fromLabelBehavior ?? widget.labelBehavior),
+        shown(widget.labelBehavior),
+        navigationLabelBehaviorCurve.transform(_labelBehaviorChange.value))!;
+  }
+
+  // The width every horizontal destination takes: the widest pill, around its
+  // label when labels show and around the icon alone when they do not, plus
+  // the pill's margins. Uniform, so destinations keep their positions as the
+  // selection moves.
   double _maxHorizontalItemWidth(
       BuildContext context, NavigationBarStyle style) {
     final labelStyle = style.horizontalLabelStyle!
         .copyWith(fontWeight: style.activeLabelWeight);
     final textDirection = Directionality.of(context);
-    final textScaler = MediaQuery.textScalerOf(context);
+    final textScaler = _labelScaler(context, style);
+    final locale = Localizations.maybeLocaleOf(context);
+    final boldText = MediaQuery.boldTextOf(context);
     var widest = style.verticalIndicatorWidth!;
     for (final destination in widget.destinations) {
-      final painter = TextPainter(
-        text: TextSpan(text: destination.label, style: labelStyle),
-        maxLines: 1,
-        textDirection: textDirection,
-        textScaler: textScaler,
-      )..layout();
       final hug = _besideLabelStart(style) +
-          painter.width +
+          measureLabel(destination.label,
+                  style: labelStyle,
+                  textDirection: textDirection,
+                  textScaler: textScaler,
+                  locale: locale,
+                  boldText: boldText)
+              .width +
           style.horizontalTrailingSpace!;
-      painter.dispose();
       if (hug > widest) widest = hug;
     }
-    return widest + 2 * style.expandedPillHorizontalMargin!;
+    return lerpDouble(style.verticalIndicatorWidth!, widest, _labelsShown)! +
+        2 * style.expandedPillHorizontalMargin!;
   }
 
   @override
@@ -260,20 +381,35 @@ class _NavigationBarState extends State<NavigationBar>
       surfaceTintColor: Colors.transparent,
       child: SafeArea(
         top: false,
-        child: SizedBox(
-          height: widget.height ?? style.height!,
-          child: LayoutBuilder(
-            builder: (context, barConstraints) {
-              final extend = _morphController.value.clamp(0.0, 1.0);
-              var margin = 0.0;
-              if (extend > 0) {
-                final n = widget.destinations.length;
-                final itemWidth = _maxHorizontalItemWidth(context, style);
-                final room = ((barConstraints.maxWidth - n * itemWidth) / 2)
-                    .clamp(0.0, double.infinity);
-                margin = room * extend;
-              }
-              return Padding(
+        child: LayoutBuilder(
+          builder: (context, barConstraints) {
+            final n = widget.destinations.length;
+            final extend = _morphController.value.clamp(0.0, 1.0);
+            var margin = 0.0;
+            if (extend > 0) {
+              final itemWidth = _maxHorizontalItemWidth(context, style);
+              final room = ((barConstraints.maxWidth - n * itemWidth) / 2)
+                  .clamp(0.0, double.infinity);
+              margin = room * extend;
+            }
+            final slotWidth =
+                (barConstraints.maxWidth - 2 * margin) / math.max(n, 1);
+            // The width a destination wraps its beside-label at: the slot,
+            // less the pill's margin, the icon and the space after the label.
+            final besideWidth = math.max(
+                0.0,
+                slotWidth -
+                    pillMarginFor(slotWidth) -
+                    _besideLabelStart(style) -
+                    style.horizontalTrailingSpace!);
+            return SizedBox(
+              // Never shorter than its contents: labels grow with the text
+              // scale instead of overflowing a fixed box.
+              height: math.max(
+                  widget.height ?? style.height!,
+                  _contentHeight(
+                      context, style, slotWidth, besideWidth, extend)),
+              child: _asTabBar(Padding(
                 padding: EdgeInsets.symmetric(horizontal: margin),
                 child: Row(
                   children: [
@@ -318,9 +454,9 @@ class _NavigationBarState extends State<NavigationBar>
                       ),
                   ],
                 ),
-              );
-            },
-          ),
+              )),
+            );
+          },
         ),
       ),
     );
@@ -386,6 +522,9 @@ class NavigationBarStyle extends ThemeExtension<NavigationBarStyle>
     this.verticalIconLabelSpacing,
     this.horizontalLeadingSpace,
     this.horizontalTrailingSpace,
+    this.maxLabelScale,
+    this.labelMaxLines,
+    this.labelOverflow,
     this.expandedPillHorizontalMargin,
     this.stateLayerColor,
     this.hoverOpacity,
@@ -431,6 +570,8 @@ class NavigationBarStyle extends ThemeExtension<NavigationBarStyle>
       verticalIconLabelSpacing: 4, // spec: vertical icon label space 4dp
       horizontalLeadingSpace: 16, // spec: horizontal indicator leading 16dp
       horizontalTrailingSpace: 16, // spec: horizontal indicator trailing 16dp
+      labelMaxLines: 2, // a label that does not fit wraps once
+      labelOverflow: TextOverflow.clip,
       expandedPillHorizontalMargin: 12,
       stateLayerColor: colors.onSecondaryContainer,
       hoverOpacity: 0.08,
@@ -599,6 +740,29 @@ class NavigationBarStyle extends ThemeExtension<NavigationBarStyle>
   /// 3: 16dp).
   final double? horizontalTrailingSpace;
 
+  /// The largest text scale factor applied to destination labels, or null to
+  /// follow the platform without limit (the default).
+  ///
+  /// The bar grows taller rather than clipping when labels scale up, as Jetpack
+  /// Compose's navigation bars do. Set this for a bar that must keep its
+  /// height; 1.3 matches Flutter's own navigation components.
+  ///
+  /// Only the labels are capped. A destination's tooltip keeps the platform's
+  /// scale, so a label that is hidden or cut off can still be read in full.
+  final double? maxLabelScale;
+
+  /// The maximum number of lines a destination label may occupy (two).
+  ///
+  /// Labels short enough not to wrap are the guidance. A label that does not
+  /// fit wraps rather than being cut, so it stays visible in full at up to
+  /// twice the text size, as Material 3's accessibility guidance asks; beyond
+  /// that it is cut. A label that fits one line is unaffected.
+  final int? labelMaxLines;
+
+  /// How a destination label that still does not fit is handled (Material 3:
+  /// clipped, never an ellipsis).
+  final TextOverflow? labelOverflow;
+
   /// The space kept clear on each side of the horizontal active indicator
   /// within its destination (12dp).
   ///
@@ -672,6 +836,9 @@ class NavigationBarStyle extends ThemeExtension<NavigationBarStyle>
       verticalIconLabelSpacing: other.verticalIconLabelSpacing,
       horizontalLeadingSpace: other.horizontalLeadingSpace,
       horizontalTrailingSpace: other.horizontalTrailingSpace,
+      maxLabelScale: other.maxLabelScale,
+      labelMaxLines: other.labelMaxLines,
+      labelOverflow: other.labelOverflow,
       expandedPillHorizontalMargin: other.expandedPillHorizontalMargin,
       stateLayerColor: other.stateLayerColor,
       hoverOpacity: other.hoverOpacity,
@@ -714,6 +881,9 @@ class NavigationBarStyle extends ThemeExtension<NavigationBarStyle>
     double? verticalIconLabelSpacing,
     double? horizontalLeadingSpace,
     double? horizontalTrailingSpace,
+    double? maxLabelScale,
+    int? labelMaxLines,
+    TextOverflow? labelOverflow,
     double? expandedPillHorizontalMargin,
     Color? stateLayerColor,
     double? hoverOpacity,
@@ -759,6 +929,9 @@ class NavigationBarStyle extends ThemeExtension<NavigationBarStyle>
           horizontalLeadingSpace ?? this.horizontalLeadingSpace,
       horizontalTrailingSpace:
           horizontalTrailingSpace ?? this.horizontalTrailingSpace,
+      maxLabelScale: maxLabelScale ?? this.maxLabelScale,
+      labelMaxLines: labelMaxLines ?? this.labelMaxLines,
+      labelOverflow: labelOverflow ?? this.labelOverflow,
       expandedPillHorizontalMargin:
           expandedPillHorizontalMargin ?? this.expandedPillHorizontalMargin,
       stateLayerColor: stateLayerColor ?? this.stateLayerColor,
@@ -817,6 +990,13 @@ class NavigationBarStyle extends ThemeExtension<NavigationBarStyle>
           lerpDouble(horizontalLeadingSpace, other.horizontalLeadingSpace, t),
       horizontalTrailingSpace:
           lerpDouble(horizontalTrailingSpace, other.horizontalTrailingSpace, t),
+      // Null means no cap rather than zero, so interpolating from it would
+      // shrink the labels mid-animation; switch over instead.
+      maxLabelScale: maxLabelScale == null || other.maxLabelScale == null
+          ? (t < 0.5 ? maxLabelScale : other.maxLabelScale)
+          : lerpDouble(maxLabelScale, other.maxLabelScale, t),
+      labelMaxLines: t < 0.5 ? labelMaxLines : other.labelMaxLines,
+      labelOverflow: t < 0.5 ? labelOverflow : other.labelOverflow,
       expandedPillHorizontalMargin: lerpDouble(
           expandedPillHorizontalMargin, other.expandedPillHorizontalMargin, t),
       stateLayerColor: Color.lerp(stateLayerColor, other.stateLayerColor, t),
@@ -864,6 +1044,9 @@ class NavigationBarStyle extends ThemeExtension<NavigationBarStyle>
         other.verticalIconLabelSpacing == verticalIconLabelSpacing &&
         other.horizontalLeadingSpace == horizontalLeadingSpace &&
         other.horizontalTrailingSpace == horizontalTrailingSpace &&
+        other.maxLabelScale == maxLabelScale &&
+        other.labelMaxLines == labelMaxLines &&
+        other.labelOverflow == labelOverflow &&
         other.expandedPillHorizontalMargin == expandedPillHorizontalMargin &&
         other.stateLayerColor == stateLayerColor &&
         other.hoverOpacity == hoverOpacity &&
@@ -903,6 +1086,9 @@ class NavigationBarStyle extends ThemeExtension<NavigationBarStyle>
         verticalIconLabelSpacing,
         horizontalLeadingSpace,
         horizontalTrailingSpace,
+        maxLabelScale,
+        labelMaxLines,
+        labelOverflow,
         expandedPillHorizontalMargin,
         stateLayerColor,
         hoverOpacity,
@@ -980,6 +1166,12 @@ class NavigationBarStyle extends ThemeExtension<NavigationBarStyle>
     properties.add(DoubleProperty(
         'horizontalTrailingSpace', horizontalTrailingSpace,
         defaultValue: null));
+    properties.add(
+        DoubleProperty('maxLabelScale', maxLabelScale, defaultValue: null));
+    properties
+        .add(IntProperty('labelMaxLines', labelMaxLines, defaultValue: null));
+    properties.add(EnumProperty<TextOverflow>('labelOverflow', labelOverflow,
+        defaultValue: null));
     properties.add(DoubleProperty(
         'expandedPillHorizontalMargin', expandedPillHorizontalMargin,
         defaultValue: null));
@@ -1022,6 +1214,9 @@ NavigationDestinationStyle _destinationStyle(NavigationBarStyle style) =>
       verticalLabelStyle: style.verticalLabelStyle,
       horizontalLabelStyle: style.horizontalLabelStyle,
       labelPadding: style.labelPadding,
+      labelMaxLines: style.labelMaxLines,
+      maxLabelScale: style.maxLabelScale,
+      labelOverflow: style.labelOverflow,
       indicatorShape: style.indicatorShape,
       useIndicator: style.useIndicator,
       overlayColor: style.overlayColor ??

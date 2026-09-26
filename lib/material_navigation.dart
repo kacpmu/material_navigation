@@ -13,6 +13,10 @@
 library;
 
 export 'src/navigation_bar.dart';
-export 'src/navigation_destination.dart' hide NavigationDestinationLayout;
+export 'src/navigation_destination.dart'
+    hide
+        NavigationDestinationLayout,
+        navigationLabelBehaviorCurve,
+        navigationLabelBehaviorDuration;
 export 'src/navigation_motion.dart';
 export 'src/navigation_rail.dart';

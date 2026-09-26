@@ -3,10 +3,12 @@ import 'dart:ui' show lerpDouble;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/rendering.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:material_ui/material_ui.dart'
     hide NavigationRail, NavigationDestination;
 import 'package:flutter/scheduler.dart' show SchedulerBinding, SchedulerPhase;
 
+import 'label_metrics.dart';
 import 'navigation_destination.dart';
 import 'navigation_motion.dart';
 
@@ -49,10 +51,30 @@ abstract class NavigationRailHandle {
   void toggleModal();
 
   /// Whether the rail is currently expanded, inline or modal.
+  ///
+  /// Always current when read. Reading it does not subscribe the caller to
+  /// changes, because [NavigationRail.of] is usable from `initState`; listen to
+  /// [openListenable] to rebuild when it changes.
   bool get isOpen;
 
   /// Whether the rail is currently expanded as a modal overlay.
+  ///
+  /// Always current when read, like [isOpen]; see [modalListenable].
   bool get isModal;
+
+  /// [isOpen] as a listenable, for a widget that must rebuild when the rail
+  /// opens or closes.
+  ///
+  /// ```dart
+  /// ValueListenableBuilder<bool>(
+  ///   valueListenable: NavigationRail.of(context).openListenable,
+  ///   builder: (context, open, _) => Text(open ? 'Close' : 'Open'),
+  /// )
+  /// ```
+  ValueListenable<bool> get openListenable;
+
+  /// [isModal] as a listenable.
+  ValueListenable<bool> get modalListenable;
 
   /// The collapsed-to-expanded animation, where 0 is collapsed and 1 is
   /// expanded.
@@ -139,7 +161,10 @@ class NavigationRail extends StatefulWidget {
   ///
   /// The rail starts collapsed when `false`. It owns its expand state once
   /// built; open and close it through [NavigationRail.of]. Changing this value
-  /// later reseeds the state, forcing the rail open or closed.
+  /// later reseeds the state, forcing the rail open or closed: `true` expands a
+  /// closed rail in place, however it was last opened, and leaves an open one
+  /// as it is; `false` closes it, a modal as [NavigationRailHandle.close]
+  /// would.
   final bool expanded;
 
   /// Called with the new open state whenever it changes, whether from an
@@ -174,7 +199,9 @@ class NavigationRail extends StatefulWidget {
   /// Overrides the collapsed width.
   ///
   /// When null, falls back to the [style]'s [NavigationRailStyle.minWidth]
-  /// (Material 3 Expressive: 96dp, baseline: 80dp). Must be positive.
+  /// (Material 3 Expressive: 96dp, baseline: 80dp). Must be positive. A
+  /// collapsed indicator wider than this
+  /// ([NavigationRailStyle.collapsedIndicatorWidth]) is fitted to it.
   final double? minWidth;
 
   /// Overrides the expanded width.
@@ -290,11 +317,16 @@ class _NavigationRailState extends State<NavigationRail>
   // unbounded so the expressive spring can overshoot for the modal overlay;
   // [_expandClamped] is the settled 0..1 view handed to destinations and the
   // handle, which doesn't follow the spring's settling bounces.
+  //
+  // The rail's content moves between the inline rail and the modal overlay
+  // rather than being rebuilt, so a slot widget keeps the animation it read
+  // from the handle. [_expandClamped] is therefore one object for the rail's
+  // lifetime that follows the content: pinned at 0 while the content is inline
+  // under a modal rail, and live wherever it is shown expanded.
   late AnimationController _expandController;
   late Animation<double> _expandClamped;
-  // The same view for the inline rail, pinned at 0 while the rail is modal
-  // (the overlay does the morphing then). One object for the rail's lifetime,
-  // so a handle read before a modal opening keeps working after it.
+  // The inline rail's own footprint, pinned at 0 while the rail is modal (the
+  // overlay does the morphing then).
   late Animation<double> _inlineExpand;
   // The room the header and the trailing widget take, measured by [_RailLayout]
   // and read by [_RenderRailGroup] in the same layout pass.
@@ -328,6 +360,7 @@ class _NavigationRailState extends State<NavigationRail>
   void initState() {
     super.initState();
     _open = widget.expanded;
+    _openListenable.value = _open;
     _initDestinationControllers();
     // Created once for the rail's lifetime, so the animations handed out
     // through NavigationRail.of stay live. Both motions pass their timing when
@@ -335,7 +368,8 @@ class _NavigationRailState extends State<NavigationRail>
     _expandController = widget.motion
         .createController(this, _open ? 1.0 : 0.0, bounded: false)
       ..addListener(_rebuild);
-    _expandClamped = _SettledAnimation(_expandController, () => _open);
+    _expandClamped = _SettledAnimation(_expandController, () => _open,
+        collapsed: () => _modal && !_modalShown);
     _inlineExpand = _SettledAnimation(_expandController, () => _open,
         collapsed: () => _modal);
     if (_modalOpen) _showModalOverlay();
@@ -344,10 +378,15 @@ class _NavigationRailState extends State<NavigationRail>
   @override
   void didUpdateWidget(NavigationRail oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // A changed [expanded] reseeds the open state (forcing it open or closed),
-    // keeping the current modality.
+    // A changed [expanded] reseeds the open state, forcing it open or closed.
+    // Opening a closed rail is in place: [_modal] only describes the last
+    // opening, and outlives it so a closing modal animates out as one. An open
+    // rail keeps its modality, and closing keeps it too, so a modal closed this
+    // way (as when [onExpandedChanged] is fed back into [expanded]) still
+    // animates out as a modal, with the inline rail held collapsed beneath.
     if (widget.expanded != oldWidget.expanded) {
-      _applyOpen(widget.expanded, _modal);
+      _applyOpen(
+          widget.expanded, widget.expanded ? _open && _modal : _modal);
     }
     if (widget.destinations.length != oldWidget.destinations.length) {
       _disposeDestinationControllers();
@@ -355,12 +394,8 @@ class _NavigationRailState extends State<NavigationRail>
       return;
     }
     if (widget.selectedIndex != oldWidget.selectedIndex) {
-      if (oldWidget.selectedIndex != null) {
-        _destinationControllers[oldWidget.selectedIndex!].reverse();
-      }
-      if (widget.selectedIndex != null) {
-        _destinationControllers[widget.selectedIndex!].forward();
-      }
+      _selectionControllerAt(oldWidget.selectedIndex)?.reverse();
+      _selectionControllerAt(widget.selectedIndex)?.forward();
     }
   }
 
@@ -368,8 +403,21 @@ class _NavigationRailState extends State<NavigationRail>
   void dispose() {
     _disposeDestinationControllers();
     _expandController.dispose();
+    _modalFocusScope.dispose();
+    _openListenable.dispose();
+    _modalListenable.dispose();
     super.dispose();
   }
+
+  // The rail's slot widgets are built in one place and moved between the
+  // inline rail and the modal overlay, so a stateful leading, trailing or
+  // expandedBody keeps its state across the transition.
+  final GlobalKey _contentKey = GlobalKey(debugLabel: 'NavigationRail content');
+  final FocusScopeNode _modalFocusScope =
+      FocusScopeNode(debugLabel: 'NavigationRail modal');
+  FocusNode? _focusBeforeModal;
+  final ValueNotifier<bool> _openListenable = ValueNotifier<bool>(false);
+  final ValueNotifier<bool> _modalListenable = ValueNotifier<bool>(false);
 
   void _applyOpen(bool open, bool modal) {
     if (open == _open && modal == _modal) return;
@@ -378,10 +426,27 @@ class _NavigationRailState extends State<NavigationRail>
       _open = open;
       _modal = modal;
     });
+    _openListenable.value = open;
+    _modalListenable.value = open && modal;
     (modal ? widget.modalMotion : widget.motion)
         .animateTo(_expandController, open ? 1.0 : 0.0);
-    if (openChanged) widget.onExpandedChanged?.call(open);
+    if (openChanged) _notifyExpandedChanged(open);
     _reconcileOverlay();
+  }
+
+  // [didUpdateWidget] reseeds the open state during the build phase, where a
+  // synchronous callback would make a setState in the caller assert.
+  void _notifyExpandedChanged(bool open) {
+    final callback = widget.onExpandedChanged;
+    if (callback == null) return;
+    if (SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) callback(open);
+      });
+    } else {
+      callback(open);
+    }
   }
 
   void _reconcileOverlay() {
@@ -402,19 +467,26 @@ class _NavigationRailState extends State<NavigationRail>
     if (_modalOpen) close();
   }
 
+  // Null rather than a range error when [index] is out of bounds: the
+  // constructor asserts the range, but a release build should not crash.
+  AnimationController? _selectionControllerAt(int? index) =>
+      index != null && index >= 0 && index < _destinationControllers.length
+          ? _destinationControllers[index]
+          : null;
+
   void _initDestinationControllers() {
     _destinationControllers = List<AnimationController>.generate(
       widget.destinations.length,
+      // The destinations listen to these themselves; the rail reads no value
+      // from them, so it deliberately does not rebuild on their ticks.
       (_) => AnimationController(
         duration: const Duration(milliseconds: 200),
         vsync: this,
-      )..addListener(_rebuild),
+      ),
     );
     _destinationAnimations =
         _destinationControllers.map((c) => c.view).toList();
-    if (widget.selectedIndex != null) {
-      _destinationControllers[widget.selectedIndex!].value = 1.0;
-    }
+    _selectionControllerAt(widget.selectedIndex)?.value = 1.0;
   }
 
   void _disposeDestinationControllers() {
@@ -432,6 +504,9 @@ class _NavigationRailState extends State<NavigationRail>
 
   void _showModalOverlay() {
     if (_modalShown) return;
+    // Remembered so closing the modal returns focus where it was, the way
+    // dismissing a route does.
+    _focusBeforeModal = FocusManager.instance.primaryFocus;
     _modalShown = true;
     _syncModalOverlay();
   }
@@ -439,6 +514,9 @@ class _NavigationRailState extends State<NavigationRail>
   void _hideModalOverlay() {
     if (!_modalShown) return;
     _modalShown = false;
+    final restore = _focusBeforeModal;
+    _focusBeforeModal = null;
+    if (restore != null && restore.context != null) restore.requestFocus();
     _syncModalOverlay();
   }
 
@@ -461,6 +539,18 @@ class _NavigationRailState extends State<NavigationRail>
     }
   }
 
+  // The tab-bar role needs at least one tab under it, and a tab needs a tap
+  // action, so a rail with nothing to select is left unroled.
+  Widget _asTabBar(Widget child) =>
+      widget.destinations.isEmpty || widget.onDestinationSelected == null
+          ? child
+          : Semantics(
+              role: SemanticsRole.tabBar,
+              explicitChildNodes: true,
+              container: true,
+              child: child,
+            );
+
   // Resolves the active style: [NavigationRail.style] over the theme's
   // extension over the variant's defaults.
   NavigationRailStyle _resolveStyle(BuildContext context) =>
@@ -473,16 +563,21 @@ class _NavigationRailState extends State<NavigationRail>
     if (fixed != null) return fixed;
     final labelStyle = style.horizontalLabelStyle!
         .copyWith(fontWeight: style.activeLabelWeight);
+    final textDirection = Directionality.of(context);
+    final textScaler = MediaQuery.textScalerOf(context);
+    final locale = Localizations.maybeLocaleOf(context);
+    final boldText = MediaQuery.boldTextOf(context);
     var widest = 0.0;
     for (final destination in widget.destinations) {
-      final painter = TextPainter(
-        text: TextSpan(text: destination.label, style: labelStyle),
-        maxLines: 1,
-        textDirection: Directionality.of(context),
-        textScaler: MediaQuery.textScalerOf(context),
-      )..layout();
-      widest = math.max(widest, painter.width);
-      painter.dispose();
+      widest = math.max(
+          widest,
+          measureLabel(destination.label,
+                  style: labelStyle,
+                  textDirection: textDirection,
+                  textScaler: textScaler,
+                  locale: locale,
+                  boldText: boldText)
+              .width);
     }
     final fit = 2 * style.expandedPillHorizontalMargin! +
         _besideLabelStart(style) +
@@ -520,7 +615,7 @@ class _NavigationRailState extends State<NavigationRail>
     final itemStyle = _destinationStyle(style);
     final hasHeader =
         widget.leading != null || widget.floatingActionButton != null;
-    final destinationsColumn = Column(
+    final destinationsColumn = _asTabBar(Column(
       mainAxisSize: MainAxisSize.min,
       children: [
         for (var i = 0; i < widget.destinations.length; i++)
@@ -558,7 +653,7 @@ class _NavigationRailState extends State<NavigationRail>
                 : null,
           ),
       ],
-    );
+    ));
     // Revealed below the destinations, which stay where [groupAlignment] puts
     // them; it scrolls into view rather than pushing them around.
     final body = includeExpandedBody &&
@@ -708,18 +803,23 @@ class _NavigationRailState extends State<NavigationRail>
     // on the trailing (inner) edge.
     final radius = Radius.circular(style.modalCornerRadius!);
 
-    return _RailScope(
+    final Widget overlay = _RailScope(
       state: this,
       expandAnimation: _expandClamped,
-      isOpen: _open,
-      isModal: _modal,
+      openSnapshot: _open,
+      modalSnapshot: _modal,
       child: Stack(
         children: [
+          // A real barrier: it carries the platform's own dismiss action and
+          // label, and covers the content behind it, so touching anywhere
+          // outside the pane reads the dismiss action.
           Positioned.fill(
-            child: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: close,
-              child: ColoredBox(color: scrim),
+            child: ModalBarrier(
+              color: scrim,
+              dismissible: true,
+              onDismiss: close,
+              semanticsLabel:
+                  MaterialLocalizations.of(context).modalBarrierDismissLabel,
             ),
           ),
           PositionedDirectional(
@@ -746,23 +846,71 @@ class _NavigationRailState extends State<NavigationRail>
               child: SafeArea(
                 right: isRtl,
                 left: !isRtl,
-                bottom: false,
+                bottom: style.applyBottomInset!,
                 child: SizedBox(
                   width: contentWidth,
-                  child: _railColumn(
-                    style: style,
-                    minWidth: minWidth,
-                    expandedWidth: expandedWidth,
-                    expandAnimation: _expandClamped,
-                    expandValue: t,
-                    includeExpandedBody: true,
-                    indicatorColor: indicatorColor,
+                  child: KeyedSubtree(
+                    key: _contentKey,
+                    child: _railColumn(
+                      style: style,
+                      minWidth: minWidth,
+                      expandedWidth: expandedWidth,
+                      expandAnimation: _expandClamped,
+                      expandValue: t,
+                      includeExpandedBody: true,
+                      indicatorColor: indicatorColor,
+                    ),
                   ),
                 ),
               ),
             ),
           ),
         ],
+      ),
+    );
+    // Escape and the system back gesture dismiss the modal, as they would a
+    // route; the PopScope registers with the enclosing route without the
+    // overlay having to be one. Once closing, back reaches the route again.
+    return PopScope(
+      canPop: !_open,
+      onPopInvokedWithResult: (didPop, _) {
+        if (!didPop) close();
+      },
+      child: Shortcuts(
+        shortcuts: const <ShortcutActivator, Intent>{
+          SingleActivator(LogicalKeyboardKey.escape): DismissIntent(),
+        },
+        child: Actions(
+          actions: <Type, Action<Intent>>{
+            DismissIntent: CallbackAction<DismissIntent>(onInvoke: (_) {
+              close();
+              return null;
+            }),
+          },
+          child: FocusScope(
+            node: _modalFocusScope,
+            child: Semantics(
+              // A container, so the barrier's blocking stops here.
+              // OverlayPortal reads its overlay in place of the rail that
+              // hosts it, and the rail is painted before the barrier: blocking
+              // past this pane would drop the rail, and the modal with it,
+              // leaving a screen reader nothing to read.
+              container: true,
+              scopesRoute: true,
+              namesRoute: true,
+              explicitChildNodes: true,
+              label: MaterialLocalizations.of(context).drawerLabel,
+              // Takes keyboard focus into the overlay. Left out of the
+              // semantics tree, where it would wrap the whole overlay in one
+              // unlabelled focusable node.
+              child: Focus(
+                autofocus: true,
+                includeSemantics: false,
+                child: overlay,
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -785,9 +933,9 @@ class _NavigationRailState extends State<NavigationRail>
 
     final rail = _RailScope(
       state: this,
-      expandAnimation: _inlineExpand,
-      isOpen: _open,
-      isModal: _modal,
+      expandAnimation: _expandClamped,
+      openSnapshot: _open,
+      modalSnapshot: _modal,
       child: Material(
         color: widget.backgroundColor ?? style.containerColor,
         elevation: style.elevation!,
@@ -795,54 +943,83 @@ class _NavigationRailState extends State<NavigationRail>
         child: SafeArea(
           right: isRtl,
           left: !isRtl,
-          bottom: false,
+          bottom: style.applyBottomInset!,
           child: SizedBox(
             width: width,
             child: !_modalShown
-                ? _railColumn(
-                    style: style,
-                    minWidth: minWidth,
-                    expandedWidth: expandedWidth,
-                    expandAnimation: _inlineExpand,
-                    expandValue: inlineValue,
-                    includeExpandedBody: !_modal,
-                    indicatorColor: indicatorColor,
+                ? KeyedSubtree(
+                    key: _contentKey,
+                    child: _railColumn(
+                      style: style,
+                      minWidth: minWidth,
+                      expandedWidth: expandedWidth,
+                      expandAnimation: _expandClamped,
+                      expandValue: _expandClamped.value,
+                      includeExpandedBody: !_modal,
+                      indicatorColor: indicatorColor,
+                    ),
                   )
-                : null,
+                // While the content is in the overlay, the rail keeps the
+                // footprint the content gives it, which fills the height it is
+                // offered. Collapsing to nothing would also leave the rail an
+                // empty rect, which drops its semantics node, and the overlay
+                // is read in that node's place.
+                : const SizedBox.expand(),
           ),
         ),
       ),
     );
-    return OverlayPortal(
-      controller: _modalOverlay,
-      overlayChildBuilder: _buildModalOverlay,
-      child: rail,
+    return Semantics(
+      // OverlayPortal marks its child as the place a screen reader reads the
+      // modal overlay from. The mark holds only on a node of its own, which it
+      // gets under a parent that keeps its children explicit; without one it
+      // merges away and the modal is read nowhere.
+      container: true,
+      explicitChildNodes: true,
+      child: OverlayPortal(
+        controller: _modalOverlay,
+        overlayChildBuilder: _buildModalOverlay,
+        child: rail,
+      ),
     );
   }
 }
 
 // The rail's handle, exposed to descendants and backing NavigationRail.of /
-// maybeOf. It carries each copy's expand animation (the inline copy is pinned
-// collapsed under a modal overlay) and delegates control to the rail [state].
+// maybeOf. It carries the content's expand animation, the same object inline
+// and in the modal overlay, and delegates control to the rail [state].
 class _RailScope extends InheritedWidget implements NavigationRailHandle {
   const _RailScope({
     required this.state,
     required this.expandAnimation,
-    required this.isOpen,
-    required this.isModal,
+    required this.openSnapshot,
+    required this.modalSnapshot,
     required super.child,
   });
+
+  // Snapshots, kept only so [updateShouldNotify] can see a change.
+  final bool openSnapshot;
+  final bool modalSnapshot;
 
   final _NavigationRailState state;
 
   @override
   final Animation<double> expandAnimation;
 
+  // Read from the state rather than captured, so a handle held across a
+  // rebuild — or across the move between the inline rail and the modal
+  // overlay — always reports the rail's current state.
   @override
-  final bool isOpen;
+  bool get isOpen => state._open;
 
   @override
-  final bool isModal;
+  bool get isModal => state._open && state._modal;
+
+  @override
+  ValueListenable<bool> get openListenable => state._openListenable;
+
+  @override
+  ValueListenable<bool> get modalListenable => state._modalListenable;
 
   @override
   void open() => state.open();
@@ -863,8 +1040,8 @@ class _RailScope extends InheritedWidget implements NavigationRailHandle {
   bool updateShouldNotify(_RailScope old) =>
       state != old.state ||
       expandAnimation != old.expandAnimation ||
-      isOpen != old.isOpen ||
-      isModal != old.isModal;
+      openSnapshot != old.openSnapshot ||
+      modalSnapshot != old.modalSnapshot;
 }
 
 /// The visual tokens that drive a [NavigationRail].
@@ -933,6 +1110,8 @@ class NavigationRailStyle extends ThemeExtension<NavigationRailStyle>
     this.verticalIconLabelSpacing,
     this.horizontalLeadingSpace,
     this.horizontalTrailingSpace,
+    this.labelMaxLines,
+    this.labelOverflow,
     this.expandedPillHorizontalMargin,
     this.topSpace,
     this.fabSpace,
@@ -943,6 +1122,7 @@ class NavigationRailStyle extends ThemeExtension<NavigationRailStyle>
     this.trailingSpace,
     this.groupAlignment,
     this.scrollable,
+    this.applyBottomInset,
     this.stateLayerColor,
     this.hoverOpacity,
     this.focusPressOpacity,
@@ -992,6 +1172,8 @@ class NavigationRailStyle extends ThemeExtension<NavigationRailStyle>
       verticalIconLabelSpacing: 4, // spec: vertical icon label space 4dp
       horizontalLeadingSpace: 16, // spec: active indicator leading space 16dp
       horizontalTrailingSpace: 16, // spec: active indicator trailing space 16dp
+      labelMaxLines: 2, // a label that does not fit wraps once
+      labelOverflow: TextOverflow.clip,
       expandedPillHorizontalMargin: 20, // spec: item horizontal padding 20dp
       topSpace: 44, // spec: top space 44dp
       fabSpace: 8,
@@ -1002,6 +1184,7 @@ class NavigationRailStyle extends ThemeExtension<NavigationRailStyle>
       trailingSpace: 20, // spec: expanded vertical trailing space 20dp
       groupAlignment: -1,
       scrollable: true,
+      applyBottomInset: true,
       stateLayerColor: colors.onSecondaryContainer,
       hoverOpacity: 0.08,
       focusPressOpacity: 0.1,
@@ -1066,6 +1249,9 @@ class NavigationRailStyle extends ThemeExtension<NavigationRailStyle>
 
   /// The collapsed container width (Material 3 Expressive: 96dp; baseline:
   /// 80dp).
+  ///
+  /// A collapsed indicator wider than this ([collapsedIndicatorWidth]) is
+  /// fitted to it.
   final double? minWidth;
 
   /// A fixed expanded container width.
@@ -1126,6 +1312,9 @@ class NavigationRailStyle extends ThemeExtension<NavigationRailStyle>
   final double? iconSize;
 
   /// The width of the collapsed (vertical) active indicator (Material 3: 56dp).
+  ///
+  /// Centred in the collapsed rail; one wider than the rail ([minWidth]) is
+  /// fitted to it.
   final double? collapsedIndicatorWidth;
 
   /// The height of the collapsed (vertical) active indicator (Material 3:
@@ -1194,6 +1383,18 @@ class NavigationRailStyle extends ThemeExtension<NavigationRailStyle>
   /// 3: 16dp).
   final double? horizontalTrailingSpace;
 
+  /// The maximum number of lines a destination label may occupy (two).
+  ///
+  /// Labels short enough not to wrap are the guidance. A label that does not
+  /// fit wraps rather than being cut, so it stays visible in full at up to
+  /// twice the text size, as Material 3's accessibility guidance asks; beyond
+  /// that it is cut. A label that fits one line is unaffected.
+  final int? labelMaxLines;
+
+  /// How a destination label that still does not fit is handled (Material 3:
+  /// clipped, never an ellipsis).
+  final TextOverflow? labelOverflow;
+
   /// The inset of the expanded active indicator from the rail's edges (Material
   /// 3 Expressive: 20dp, which keeps the icons in place as the rail expands).
   final double? expandedPillHorizontalMargin;
@@ -1239,6 +1440,12 @@ class NavigationRailStyle extends ThemeExtension<NavigationRailStyle>
   /// Whether the destinations scroll when they do not fit (true). When false,
   /// destinations that do not fit overflow.
   final bool? scrollable;
+
+  /// Whether the rail insets its content by the bottom view padding (true).
+  ///
+  /// Keeps [NavigationRail.trailing] clear of a system gesture bar. Set false
+  /// for a rail whose own container already sits above that inset.
+  final bool? applyBottomInset;
 
   /// The color of the hover, focus and pressed state layers (Material 3:
   /// [ColorScheme.onSecondaryContainer]).
@@ -1313,6 +1520,8 @@ class NavigationRailStyle extends ThemeExtension<NavigationRailStyle>
       verticalIconLabelSpacing: other.verticalIconLabelSpacing,
       horizontalLeadingSpace: other.horizontalLeadingSpace,
       horizontalTrailingSpace: other.horizontalTrailingSpace,
+      labelMaxLines: other.labelMaxLines,
+      labelOverflow: other.labelOverflow,
       expandedPillHorizontalMargin: other.expandedPillHorizontalMargin,
       topSpace: other.topSpace,
       fabSpace: other.fabSpace,
@@ -1323,6 +1532,7 @@ class NavigationRailStyle extends ThemeExtension<NavigationRailStyle>
       trailingSpace: other.trailingSpace,
       groupAlignment: other.groupAlignment,
       scrollable: other.scrollable,
+      applyBottomInset: other.applyBottomInset,
       stateLayerColor: other.stateLayerColor,
       hoverOpacity: other.hoverOpacity,
       focusPressOpacity: other.focusPressOpacity,
@@ -1371,6 +1581,8 @@ class NavigationRailStyle extends ThemeExtension<NavigationRailStyle>
     double? verticalIconLabelSpacing,
     double? horizontalLeadingSpace,
     double? horizontalTrailingSpace,
+    int? labelMaxLines,
+    TextOverflow? labelOverflow,
     double? expandedPillHorizontalMargin,
     double? topSpace,
     double? fabSpace,
@@ -1381,6 +1593,7 @@ class NavigationRailStyle extends ThemeExtension<NavigationRailStyle>
     double? trailingSpace,
     double? groupAlignment,
     bool? scrollable,
+    bool? applyBottomInset,
     Color? stateLayerColor,
     double? hoverOpacity,
     double? focusPressOpacity,
@@ -1432,6 +1645,8 @@ class NavigationRailStyle extends ThemeExtension<NavigationRailStyle>
           horizontalLeadingSpace ?? this.horizontalLeadingSpace,
       horizontalTrailingSpace:
           horizontalTrailingSpace ?? this.horizontalTrailingSpace,
+      labelMaxLines: labelMaxLines ?? this.labelMaxLines,
+      labelOverflow: labelOverflow ?? this.labelOverflow,
       expandedPillHorizontalMargin:
           expandedPillHorizontalMargin ?? this.expandedPillHorizontalMargin,
       topSpace: topSpace ?? this.topSpace,
@@ -1445,6 +1660,7 @@ class NavigationRailStyle extends ThemeExtension<NavigationRailStyle>
       trailingSpace: trailingSpace ?? this.trailingSpace,
       groupAlignment: groupAlignment ?? this.groupAlignment,
       scrollable: scrollable ?? this.scrollable,
+      applyBottomInset: applyBottomInset ?? this.applyBottomInset,
       stateLayerColor: stateLayerColor ?? this.stateLayerColor,
       hoverOpacity: hoverOpacity ?? this.hoverOpacity,
       focusPressOpacity: focusPressOpacity ?? this.focusPressOpacity,
@@ -1509,6 +1725,8 @@ class NavigationRailStyle extends ThemeExtension<NavigationRailStyle>
           lerpDouble(horizontalLeadingSpace, other.horizontalLeadingSpace, t),
       horizontalTrailingSpace:
           lerpDouble(horizontalTrailingSpace, other.horizontalTrailingSpace, t),
+      labelMaxLines: t < 0.5 ? labelMaxLines : other.labelMaxLines,
+      labelOverflow: t < 0.5 ? labelOverflow : other.labelOverflow,
       expandedPillHorizontalMargin: lerpDouble(
           expandedPillHorizontalMargin, other.expandedPillHorizontalMargin, t),
       topSpace: lerpDouble(topSpace, other.topSpace, t),
@@ -1522,6 +1740,7 @@ class NavigationRailStyle extends ThemeExtension<NavigationRailStyle>
       trailingSpace: lerpDouble(trailingSpace, other.trailingSpace, t),
       groupAlignment: lerpDouble(groupAlignment, other.groupAlignment, t),
       scrollable: t < 0.5 ? scrollable : other.scrollable,
+      applyBottomInset: t < 0.5 ? applyBottomInset : other.applyBottomInset,
       stateLayerColor: Color.lerp(stateLayerColor, other.stateLayerColor, t),
       hoverOpacity: lerpDouble(hoverOpacity, other.hoverOpacity, t),
       focusPressOpacity:
@@ -1574,6 +1793,8 @@ class NavigationRailStyle extends ThemeExtension<NavigationRailStyle>
         other.verticalIconLabelSpacing == verticalIconLabelSpacing &&
         other.horizontalLeadingSpace == horizontalLeadingSpace &&
         other.horizontalTrailingSpace == horizontalTrailingSpace &&
+        other.labelMaxLines == labelMaxLines &&
+        other.labelOverflow == labelOverflow &&
         other.expandedPillHorizontalMargin == expandedPillHorizontalMargin &&
         other.topSpace == topSpace &&
         other.fabSpace == fabSpace &&
@@ -1584,6 +1805,7 @@ class NavigationRailStyle extends ThemeExtension<NavigationRailStyle>
         other.trailingSpace == trailingSpace &&
         other.groupAlignment == groupAlignment &&
         other.scrollable == scrollable &&
+        other.applyBottomInset == applyBottomInset &&
         other.stateLayerColor == stateLayerColor &&
         other.hoverOpacity == hoverOpacity &&
         other.focusPressOpacity == focusPressOpacity &&
@@ -1629,6 +1851,8 @@ class NavigationRailStyle extends ThemeExtension<NavigationRailStyle>
         verticalIconLabelSpacing,
         horizontalLeadingSpace,
         horizontalTrailingSpace,
+        labelMaxLines,
+        labelOverflow,
         expandedPillHorizontalMargin,
         topSpace,
         fabSpace,
@@ -1639,6 +1863,7 @@ class NavigationRailStyle extends ThemeExtension<NavigationRailStyle>
         trailingSpace,
         groupAlignment,
         scrollable,
+        applyBottomInset,
         stateLayerColor,
         hoverOpacity,
         focusPressOpacity,
@@ -1727,6 +1952,10 @@ class NavigationRailStyle extends ThemeExtension<NavigationRailStyle>
     properties.add(DoubleProperty(
         'horizontalTrailingSpace', horizontalTrailingSpace,
         defaultValue: null));
+    properties
+        .add(IntProperty('labelMaxLines', labelMaxLines, defaultValue: null));
+    properties.add(EnumProperty<TextOverflow>('labelOverflow', labelOverflow,
+        defaultValue: null));
     properties.add(DoubleProperty(
         'expandedPillHorizontalMargin', expandedPillHorizontalMargin,
         defaultValue: null));
@@ -1746,6 +1975,9 @@ class NavigationRailStyle extends ThemeExtension<NavigationRailStyle>
     properties.add(
         DoubleProperty('groupAlignment', groupAlignment, defaultValue: null));
     properties.add(DiagnosticsProperty<bool>('scrollable', scrollable,
+        defaultValue: null));
+    properties.add(DiagnosticsProperty<bool>(
+        'applyBottomInset', applyBottomInset,
         defaultValue: null));
     properties.add(
         ColorProperty('stateLayerColor', stateLayerColor, defaultValue: null));
@@ -1786,6 +2018,8 @@ NavigationDestinationStyle _destinationStyle(NavigationRailStyle style) =>
       verticalLabelStyle: style.verticalLabelStyle,
       horizontalLabelStyle: style.horizontalLabelStyle,
       labelPadding: style.labelPadding,
+      labelMaxLines: style.labelMaxLines,
+      labelOverflow: style.labelOverflow,
       indicatorShape: style.indicatorShape,
       useIndicator: style.useIndicator,
       overlayColor: style.overlayColor ??
@@ -1890,7 +2124,8 @@ class _RailGroupParentData extends ContainerBoxParentData<RenderBox> {}
 class _RenderRailGroup extends RenderBox
     with
         ContainerRenderObjectMixin<RenderBox, _RailGroupParentData>,
-        RenderBoxContainerDefaultsMixin<RenderBox, _RailGroupParentData> {
+        RenderBoxContainerDefaultsMixin<RenderBox, _RailGroupParentData>,
+        DebugOverflowIndicatorMixin {
   _RenderRailGroup(this._alignment, this._viewportHeight, this._insets);
 
   double get alignment => _alignment;
@@ -1952,11 +2187,38 @@ class _RenderRailGroup extends RenderBox
     }
     size = constraints.constrain(
         Size(constraints.maxWidth, math.max(viewportHeight, top + content)));
+    // Only reachable when the rail does not scroll: inside a scroll view the
+    // group is laid out against unbounded height and always fits.
+    _overflow = math.max(0.0, top + content - size.height);
   }
 
+  double _overflow = 0;
+
   @override
-  void paint(PaintingContext context, Offset offset) =>
+  void paint(PaintingContext context, Offset offset) {
+    if (_overflow <= precisionErrorTolerance) {
       defaultPaint(context, offset);
+      return;
+    }
+    // Destinations that do not fit are clipped to the rail rather than painted
+    // over the body beside it.
+    context.pushClipRect(
+        needsCompositing, offset, Offset.zero & size, defaultPaint);
+    assert(() {
+      paintOverflowIndicator(context, offset, Offset.zero & size,
+          Offset.zero & Size(size.width, size.height + _overflow),
+          overflowHints: <DiagnosticsNode>[
+            ErrorDescription(
+                'The destinations of a NavigationRail do not fit in the space '
+                'available, and NavigationRailStyle.scrollable is false.'),
+            ErrorHint(
+                'Consider leaving scrollable at its default so the rail can '
+                'scroll, showing fewer destinations, or giving the rail more '
+                'height.'),
+          ]);
+      return true;
+    }());
+  }
 
   @override
   bool hitTestChildren(BoxHitTestResult result, {required Offset position}) =>
