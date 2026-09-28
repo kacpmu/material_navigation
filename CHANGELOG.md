@@ -1,3 +1,105 @@
+## 0.2.0
+
+A rewrite against the Material 3 Expressive specification and design tokens,
+with Flutter's parameter names where the two share a concept.
+
+**Breaking**
+
+* Material 3 Expressive only: the baseline variant, `StyleVariant` and the
+  `NavigationBarStyle.flexible` / `.baseline` and `NavigationRailStyle`
+  `.expressive` / `.baseline` factories are removed.
+* `NavigationRail` no longer keeps its own expanded state. `expanded` is owned
+  by the parent and the rail never changes it; `onExpandedChanged`,
+  `NavigationRailHandle` and the handle's `open`, `openModal`, `close`,
+  `toggle` and `toggleModal` are removed. The modal opens through the new
+  `NavigationRailController`, which `NavigationRail.of` now returns.
+* `NavigationDestination` takes `enabled` in place of `disabled`, and renders
+  only inside a bar or a rail. `NavigationDestination.custom`, its layout
+  arguments and `NavigationDestinationStyle` are removed, and so is
+  `expandAnimation`: a destination anywhere in a rail outside its
+  destinations, such as `trailing`, still takes the rail's layout and style,
+  and now follows the rail's expansion by itself. It is never selected, and a
+  tap calls its `onTap`, which it keeps.
+* `NavigationBar.layoutDirection` is replaced by `itemLayout`
+  (`NavigationBarItemLayout.vertical` or `.horizontal`). `selectedIndex`
+  defaults to 0, as Flutter's does.
+* `NavigationLabelBehavior` is replaced by `material_ui`'s own enums:
+  `NavigationBar.labelBehavior` takes a `NavigationDestinationLabelBehavior`,
+  and `NavigationRail.labelType` a `NavigationRailLabelType`.
+* `NavigationIndicatorSize.label` is renamed `hug`.
+* `NavigationMotion.standard` is now Material 3's standard spring scheme; the
+  former duration-and-curve motion is `NavigationMotion.easing`.
+  `NavigationRail.modalMotion` is removed: the modal uses the motion's fast
+  spatial spring. `NavigationMotion.defaultSpatial` and `.fastSpatial` are
+  renamed `expressiveDefaultSpatial` and `expressiveFastSpatial`.
+* Style tokens are renamed after their rule in the specification, for example
+  `containerColor` to `backgroundColor`, `activeIconColor` to
+  `selectedIconColor`, `verticalLabelStyle` to `labelStyle` and
+  `focusPressOpacity` to `focusOpacity` and `pressedOpacity`. `variant`,
+  `selectionDuration`, `modalOvershoot`, `modalCornerRadius` (now
+  `modalShape`), `fabSpace` (now `headerItemSpacing`), `trailingSpace` and the
+  bar's `horizontalIndicatorSize` are removed, and so is `activeLabelWeight`:
+  a `labelTextStyle` resolving `WidgetState.selected` sets the selected
+  label's weight.
+
+**Specification**
+
+* The active indicator springs in, growing from its center, or from the start
+  edge in an expanded rail, and the label color follows on the effects
+  spring.
+* Horizontal bar items are centered with percentage side padding, and widen
+  to fit their labels, as Material 3 specifies.
+* A collapsed rail destination without a label has a 56dp circular
+  indicator.
+* The expanded rail's label switches to `labelLarge` at the midpoint of the
+  expansion, where it is invisible, and the icons never move sideways.
+* State layers are `onSecondaryContainer` in every state.
+* The bar's selected label below the icon is `secondary`, and beside the icon
+  `onSecondaryContainer`.
+* Labels are no longer limited to two lines by default: the full label stays
+  visible at large text sizes.
+
+**New**
+
+* `NavigationRailController`: `openModal`, which returns a future completing
+  when the modal closes, `closeModal` and `isModalOpen`.
+* The modal responds to Android's predictive back gesture.
+* The modal's background slides in from the leading edge, the destinations
+  expanding in place, and settles without swinging back.
+* A rail with `minWidth: 0` takes no room while collapsed, and keeps its
+  content from focus and screen readers; its modal's destinations slide in
+  with the background, which can be dragged closed.
+* `NavigationRail.secondaryDestinations`, shown only while expanded, their
+  indices following those of `destinations`.
+* `NavigationRail.layout` and `modalLayout`: the rail's content in a header,
+  a group and a footer, with `NavigationRailSlot`s for its own parts and for
+  any widget, shown always, only expanded or only collapsed. Slots shown
+  only collapsed next to slots shown only expanded take turns in one room.
+* `NavigationDestination.badge`, on the icon and beside the label of an
+  expanded rail, and `NavigationDestination.semanticLabel`.
+* `NavigationRail.expandedAnimation(context)`.
+* `NavigationMenuButton`, whose icon turns from menu to menu-open as the rail
+  expands, and which opens and closes the rail's modal unless given
+  `onPressed`.
+* A floating action button that widens with the rail's expansion keeps its
+  start still.
+* An example, and rail layouts to start from in the demo, among them an
+  extending floating action button.
+* The rail's `groupAlignment` places the group at the bottom as well.
+* `NavigationRailStyle.divider`, on the edge next to the content.
+* Destinations announce their position among their tabs ("Tab 2 of 4").
+
+**Changed**
+
+* The bar and the rail take Flutter's own parameters: `animationDuration`,
+  `shadowColor`, `surfaceTintColor`, `indicatorShape`, `overlayColor`,
+  `labelTextStyle`, `labelPadding` and `maintainBottomViewPadding` on the bar;
+  `elevation`, `useIndicator`, `indicatorShape`, the selected and unselected
+  label styles and icon themes, `minExpandedWidth` and `scrollable` on the
+  rail.
+* Destinations are laid out by a single render object each, and animation
+  frames relayout and repaint them without rebuilding.
+
 ## 0.1.1
 
 **Accessibility**

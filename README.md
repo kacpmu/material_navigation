@@ -1,6 +1,21 @@
 # material_navigation
 
-Material 3 Expressive navigation for Flutter: a flexible navigation bar, and a navigation rail that expands in place or as a modal overlay.
+Material 3 Expressive navigation for Flutter: a navigation bar with vertical or horizontal items, and a navigation rail that is collapsed or expanded, in place or as a modal.
+
+The widgets take the parameters of Flutter's own `NavigationBar` and `NavigationRail` where the two share a concept, and follow the Material 3 Expressive specification and design tokens.
+
+## Table of Contents
+
+- [Getting started](#getting-started)
+- [Navigation bar](#navigation-bar)
+- [Navigation rail](#navigation-rail)
+  - [The modal](#the-modal)
+  - [Layout and slots](#layout-and-slots)
+- [Destinations](#destinations)
+- [Styling](#styling)
+- [Motion](#motion)
+- [Migrating from Flutter's widgets](#migrating-from-flutters-widgets)
+- [License](#license)
 
 ## Getting started
 
@@ -8,165 +23,278 @@ Material 3 Expressive navigation for Flutter: a flexible navigation bar, and a n
 flutter pub add material_navigation material_ui
 ```
 
-These widgets are built on [`material_ui`](https://pub.dev/packages/material_ui), the standalone Material library, and read their theme from its `Theme`. An application using them should therefore use `material_ui`'s `MaterialApp` or `Theme`: a theme from `package:flutter/material.dart` is not visible to them. See the [`material_ui` migration guide](https://pub.dev/packages/material_ui#migrating-existing-code-to-this-package) for moving an existing application over.
-
-The package declares three names that the Material library also declares, so hide the Material versions at the import:
+The widgets are built on [`material_ui`](https://pub.dev/packages/material_ui), the standalone Material library, and read their theme from its `Theme`. The package declares three names that the Material library also declares, so hide those at the import:
 
 ```dart
-import 'package:material_ui/material_ui.dart' hide NavigationBar, NavigationRail, NavigationDestination;
+import 'package:material_ui/material_ui.dart'
+    hide NavigationBar, NavigationDestination, NavigationRail;
 import 'package:material_navigation/material_navigation.dart';
 ```
 
-All widgets and styles are exported from that one library.
+## Navigation bar
 
-## Examples
-
-### Navigation rail
-
-The rail keeps its own expanded state. A button in the `leading` slot controls it through `NavigationRail.of(context)`; wrap the button in a `Builder` so that its context is below the rail.
+Three to five destinations at the bottom of a compact or medium window.
 
 ```dart
-NavigationRail(
+NavigationBar(
   selectedIndex: _index,
-  onDestinationSelected: (i) => setState(() => _index = i),
-  leading: Builder(
-    builder: (context) => IconButton(
-      icon: const Icon(Icons.menu),
-      onPressed: NavigationRail.of(context).toggle, // .toggleModal() for an overlay
+  onDestinationSelected: (index) => setState(() => _index = index),
+  destinations: [
+    const NavigationDestination(
+      icon: Icon(Icons.home_outlined),
+      selectedIcon: Icon(Icons.home),
+      label: 'Home',
     ),
-  ),
-  destinations: const [
-    NavigationDestination(icon: Icon(Icons.inbox_outlined), selectedIcon: Icon(Icons.inbox), label: 'Inbox'),
-    NavigationDestination(icon: Icon(Icons.send_outlined), selectedIcon: Icon(Icons.send), label: 'Sent'),
-    NavigationDestination(icon: Icon(Icons.archive_outlined), selectedIcon: Icon(Icons.archive), label: 'Archive'),
+    NavigationDestination(
+      icon: const Icon(Icons.chat_bubble_outline),
+      selectedIcon: const Icon(Icons.chat_bubble),
+      label: 'Chats',
+      badge: Badge.count(count: _unread),
+    ),
+    const NavigationDestination(
+      icon: Icon(Icons.person_outline),
+      selectedIcon: Icon(Icons.person),
+      label: 'You',
+    ),
   ],
 )
 ```
 
-### Rail with secondary destinations
+`itemLayout` places each label below its icon (`vertical`, the default) or beside it, inside the active indicator (`horizontal`). Horizontal items are centered as a group. A change of `itemLayout` animates.
 
-`expandedBody` is shown only while the rail is expanded. Material 3 uses that area for secondary destinations, which a collapsed rail has no room for. It is placed below the destinations and scrolls into view; the destinations themselves stay where `groupAlignment` puts them.
+No widget in this package adapts itself to the window: the app decides. Material 3 uses horizontal items from 600dp:
+
+```dart
+NavigationBar(
+  itemLayout: MediaQuery.sizeOf(context).width >= 600
+      ? NavigationBarItemLayout.horizontal
+      : NavigationBarItemLayout.vertical,
+  // ...
+)
+```
+
+## Navigation rail
+
+Three to seven destinations along the leading edge of a medium or larger window. Collapsed, the rail is 96dp wide with the labels below the icons. Expanded, it is as wide as its widest destination, between 220dp and 360dp, with the labels beside the icons.
+
+`expanded` expands the rail in place, pushing the content aside. The parent owns it; the rail never changes it. Material 3 uses a collapsed rail in medium windows and an expanded rail in large ones:
 
 ```dart
 NavigationRail(
+  expanded: MediaQuery.sizeOf(context).width >= 1200,
   selectedIndex: _index,
-  onDestinationSelected: (i) => setState(() => _index = i),
-  leading: Builder(
-    builder: (context) => IconButton(
+  onDestinationSelected: (index) => setState(() => _index = index),
+  destinations: const [
+    NavigationDestination(
+      icon: Icon(Icons.inbox_outlined),
+      selectedIcon: Icon(Icons.inbox),
+      label: 'Inbox',
+    ),
+    NavigationDestination(
+      icon: Icon(Icons.send_outlined),
+      selectedIcon: Icon(Icons.send),
+      label: 'Sent',
+    ),
+    NavigationDestination(
+      icon: Icon(Icons.drafts_outlined),
+      selectedIcon: Icon(Icons.drafts),
+      label: 'Drafts',
+    ),
+  ],
+)
+```
+
+### The modal
+
+The expanded rail can also open as a modal over the content, behind a scrim. The modal is transient, like a drawer: it opens through a `NavigationRailController` and closes itself when the user taps the scrim, presses back or Escape, or selects a destination. Android's predictive back gesture shrinks it as the gesture progresses.
+
+`NavigationMenuButton` opens the modal of the rail around it, or closes it when it is open. Its icon turns from menu to menu-open as the rail expands, in place or as the modal:
+
+```dart
+NavigationRail(
+  leading: const NavigationMenuButton(),
+  // ...
+)
+```
+
+A rail expanded in place is the parent's to collapse, so its button takes an `onPressed` that changes `expanded`:
+
+```dart
+leading: NavigationMenuButton(
+  onPressed: () => setState(() => _expanded = !_expanded),
+),
+```
+
+Any other widget inside the rail reaches the rail's controller with `NavigationRail.of(context)`.
+
+A controller passed to the rail works from anywhere. Its background slides in from the leading edge; the collapsed rail's destinations expand in place as it arrives. With a collapsed width of 0, the rail takes no room until it opens, and its destinations slide in with the background, which can also be dragged away. That is Material 3's navigation for compact windows with more destinations than a bar holds:
+
+```dart
+final _rail = NavigationRailController(); // disposed with the State
+
+Scaffold(
+  appBar: AppBar(
+    leading: IconButton(
       icon: const Icon(Icons.menu),
-      onPressed: NavigationRail.of(context).toggle,
+      onPressed: _rail.openModal,
     ),
   ),
-  destinations: const [
-    NavigationDestination(icon: Icon(Icons.inbox_outlined), selectedIcon: Icon(Icons.inbox), label: 'Inbox'),
-    NavigationDestination(icon: Icon(Icons.send_outlined), selectedIcon: Icon(Icons.send), label: 'Sent'),
-  ],
-  expandedBody: Column(
-    children: const [
-      ListTile(leading: Icon(Icons.label_outline), title: Text('Promotions')),
-      ListTile(leading: Icon(Icons.label_outline), title: Text('Social')),
-      ListTile(leading: Icon(Icons.label_outline), title: Text('Updates')),
+  body: Row(
+    children: [
+      NavigationRail(controller: _rail, minWidth: 0, /* ... */),
+      Expanded(child: page),
     ],
   ),
 )
 ```
 
-### Navigation bar
+`openModal` returns a future that completes when the modal closes. While the rail is expanded in place, it does nothing. Setting `expanded` to true while the modal is open turns the modal into the in-place rail, so a window that grows past a breakpoint needs no special handling.
 
-The bar takes the same `selectedIndex`, `onDestinationSelected` and `destinations` arguments as Flutter's own `NavigationBar`, and the same `NavigationDestination(icon:, selectedIcon:, label:)` description of a destination.
+### Layout and slots
 
-With `layoutDirection: Axis.horizontal`, each destination places its icon beside its label, and the destinations are centred as a group with outer margins. Changing `layoutDirection` animates between the two layouts using `motion`.
+The rail places its content in three regions: a header pinned to the top, a group placed by `groupAlignment` that scrolls when it does not fit, and a footer pinned to the bottom. `layout` arranges the rail's parts in them and mixes in other widgets; `modalLayout` does the same for the modal, which often wants a header of its own:
 
 ```dart
-NavigationBar(
-  layoutDirection: Axis.horizontal, // or Axis.vertical
-  selectedIndex: _index,
-  onDestinationSelected: (i) => setState(() => _index = i),
-  destinations: const [
-    NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home), label: 'Home'),
-    NavigationDestination(icon: Icon(Icons.search), label: 'Search'),
-    NavigationDestination(icon: Icon(Icons.person_outline), selectedIcon: Icon(Icons.person), label: 'Profile'),
-  ],
+NavigationRail(
+  destinations: _mailboxes,
+  secondaryDestinations: _labels, // shown only while expanded
+  expandedBody: const StorageMeter(),
+  trailing: const AccountButton(),
+  layout: const NavigationRailLayout(
+    group: [
+      NavigationRailSlot.destinations,
+      NavigationRailSlot.widget(
+        Text('Labels'),
+        visibility: NavigationRailSlotVisibility.expanded,
+      ),
+      NavigationRailSlot.secondaryDestinations,
+      NavigationRailSlot.expandedBody,
+      NavigationRailSlot.trailing, // straight after the group
+    ],
+    footer: [],
+  ),
+  modalLayout: NavigationRailLayout(
+    header: [NavigationRailSlot.widget(MailHeader(onClose: _rail.closeModal))],
+  ),
+  // ...
 )
 ```
 
-## Motion
+While the modal shows, the rail keeps only its footprint. Without a `modalLayout`, the rail's content moves into the modal and its widgets keep their state; with one, they are built again when the modal closes.
 
-Both the bar and the rail accept a `motion`, which drives the transition between their two layouts. The default is the Material 3 Expressive spatial spring, `NavigationMotion.defaultSpatial`; a rail opening as a modal overlay uses the faster `NavigationMotion.fastSpatial`, which its `modalMotion` argument controls. `NavigationMotion.standard()` replaces the spring with a fixed duration and curve.
+A widget slot is as wide as the rail at each moment, so one that always shows passes through the collapsed width while the rail or its modal expands. A header with a title should let the title give way, for example with `TextOverflow.fade`.
+
+The indices of `secondaryDestinations` follow those of `destinations`: with three destinations, the first secondary destination is index 3 for `selectedIndex` and `onDestinationSelected`.
+
+`NavigationRail.expandedAnimation(context)` gives widgets in the rail its expansion, from 0 to 1. Material 3 asks the rail's floating action button to become an extended one as the rail expands; one that widens with the animation keeps its start still, as the rail places it. For example, a `FloatingActionButton.extended` whose label is uncovered as the rail expands:
 
 ```dart
-NavigationRail( // spring (Expressive)
-  motion: const NavigationMotion.expressive(),
-  // ...
-);
+floatingActionButton: Builder(builder: (context) {
+  final expansion = NavigationRail.expandedAnimation(context);
+  return FloatingActionButton.extended(
+    heroTag: null,
+    elevation: 0,
+    // 56dp wide with the label hidden; its spacing is in the label.
+    extendedPadding: const EdgeInsetsDirectional.symmetric(horizontal: 16),
+    extendedIconLabelSpacing: 0,
+    onPressed: _compose,
+    icon: const Icon(Icons.edit_outlined),
+    label: AnimatedBuilder(
+      animation: expansion,
+      builder: (context, label) => ClipRect(
+        child: Align(
+          alignment: AlignmentDirectional.centerStart,
+          widthFactor: expansion.value,
+          child: label,
+        ),
+      ),
+      child: const Padding(
+        padding: EdgeInsetsDirectional.only(start: 8),
+        child: Text('Compose'),
+      ),
+    ),
+  );
+}),
+```
 
-NavigationRail( // a softer, custom spring
-  motion: const NavigationMotion.expressive(
-    spring: SpringDescription(mass: 1, stiffness: 300, damping: 30),
+## Destinations
+
+`NavigationDestination` takes an `icon`, an optional `selectedIcon`, a `label` and an optional `tooltip`, as Flutter's does, and `enabled`. It adds:
+
+- `badge`, typically a `Badge` without a child, placed at the icon's top end, and beside the label in an expanded rail;
+- `semanticLabel`, an accessible name for a label that is ambiguous on its own;
+- `onTap`, called when the destination is tapped, before `onDestinationSelected`.
+
+A destination is announced as a tab, with its position ("Tab 2 of 4"). A label that is hidden, by `labelBehavior`, `labelType` or a collapsed rail with no labels, shows as a tooltip.
+
+A destination also works anywhere else in a rail, such as its `trailing` widget or a widget of its layout. It takes the rail's layout and style, so it lines up with the rail's destinations and expands with them; it is never selected, and a tap calls its `onTap` (and closes the modal):
+
+```dart
+NavigationRail(
+  trailing: NavigationDestination(
+    icon: const Icon(Icons.settings_outlined),
+    label: 'Settings',
+    onTap: _openSettings,
   ),
   // ...
-);
-
-NavigationBar( // a fixed duration eased by a curve
-  motion: const NavigationMotion.standard(
-    duration: Duration(milliseconds: 300),
-    curve: Curves.easeInOutCubicEmphasized,
-  ),
-  // ...
-);
+)
 ```
 
 ## Styling
 
-Every token of `NavigationBarStyle` and `NavigationRailStyle` is optional; an unset token falls back to the Material 3 default for the current `ColorScheme` and `TextTheme`. Both classes are `ThemeExtension`s, so a style can be set for an entire application in the theme and overridden for a single widget with `style:`:
+`NavigationBarStyle` and `NavigationRailStyle` hold every token of their component, from colors and text styles to the indicator's size and the rail's spacing. Every token is optional; unset tokens fall back to the Material 3 Expressive defaults for the current `ColorScheme` and `TextTheme`. Both are `ThemeExtension`s:
 
 ```dart
 MaterialApp(
   theme: ThemeData(
     extensions: const [
       NavigationBarStyle(indicatorColor: Colors.amber),
-      NavigationRailStyle(expandedWidth: 320, groupAlignment: 0),
+      NavigationRailStyle(
+        expandedIndicatorSize: NavigationIndicatorSize.fill,
+        divider: BorderSide(),
+      ),
     ],
   ),
-  // ...
 );
+```
 
-NavigationBar( // this bar only: a squarer indicator
-  style: const NavigationBarStyle(
-    indicatorShape: RoundedRectangleBorder(
-      borderRadius: BorderRadius.all(Radius.circular(8)),
-    ),
+A style passed to a widget applies over the theme's, and a widget's own arguments, such as `backgroundColor`, apply over both. `NavigationBarStyle.of(context)` and `NavigationRailStyle.of(context)` return the resolved style.
+
+`iconTheme`, `labelTextStyle` and `overlayColor` are `WidgetStateProperty`s, resolved against `selected`, `disabled`, `hovered`, `focused` and `pressed`.
+
+## Motion
+
+Both widgets animate with springs, the Material 3 Expressive motion scheme by default. `motion` selects another:
+
+```dart
+NavigationRail(motion: const NavigationMotion.standard(), /* ... */);
+
+NavigationBar(
+  motion: NavigationMotion(
+    defaultSpatial: SpringDescription.withDampingRatio(
+        mass: 1, stiffness: 300, ratio: 0.7),
+    fastSpatial: NavigationMotion.expressiveFastSpatial,
+    defaultEffects: NavigationMotion.expressiveDefaultEffects,
   ),
   // ...
 );
 ```
 
-`variant` selects the defaults used for the remaining tokens: `StyleVariant.material3Expressive`, the default, or `StyleVariant.material3` for the pre-Expressive baseline, as in `NavigationBarStyle(variant: StyleVariant.material3)`.
+`NavigationMotion.easing` replaces the springs with a duration and a curve. The bar's `animationDuration` selects it for the selection.
 
-Colours and text can also depend on interaction state. `iconTheme`, `labelTextStyle` and `overlayColor` are `WidgetStateProperty`s, resolved against `selected`, `disabled`, `hovered`, `focused` and `pressed`:
+## Migrating from Flutter's widgets
 
-```dart
-NavigationRailStyle(
-  labelTextStyle: WidgetStateProperty.resolveWith((states) =>
-      states.contains(WidgetState.hovered)
-          ? const TextStyle(decoration: TextDecoration.underline)
-          : null),
-)
-```
-
-`NavigationBarStyle.of(context)` and `NavigationRailStyle.of(context)` return the fully resolved style. `NavigationBarStyle.flexible(...)`, `NavigationBarStyle.baseline(...)`, `NavigationRailStyle.expressive(...)` and `NavigationRailStyle.baseline(...)` build a complete style from a `ColorScheme` and `TextTheme`.
-
-## Components
-
-| Type | Description |
+| Flutter | material_navigation |
 | --- | --- |
-| `NavigationBar` | A bottom navigation bar of three to five destinations: Material 3 Expressive flexible, 64dp, or baseline, 80dp. |
-| `NavigationBarStyle` | The tokens of a bar, usable as a theme extension, with `.flexible` and `.baseline` factories, `of`, `merge` and `copyWith`. |
-| `NavigationRail` | A rail that collapses and expands, in place or as a modal overlay, with `leading`, `floatingActionButton`, `trailing` and `expandedBody` slots. |
-| `NavigationRailHandle` | The handle returned by `NavigationRail.of(context)`: `open`, `openModal`, `close`, `toggle`, `toggleModal`, `isOpen`, `isModal` and `expandAnimation`. |
-| `NavigationRailStyle` | The tokens of a rail, usable as a theme extension, with `.expressive` and `.baseline` factories, `of`, `merge` and `copyWith`. |
-| `NavigationDestination` | A destination shared by the bar and the rail, which animates between the vertical and horizontal layouts. |
-| `NavigationDestinationStyle` | The resolved styling of a single destination: colours, label styles, indicator shape, and the per-state icon, label and state layer. |
-| `NavigationLabelBehavior` | When the label below the icon is shown: `all`, `selected` or `none`. |
-| `NavigationIndicatorSize` | How the expanded active indicator is sized: `fill`, the full width, or `label`, sized to the icon and label. |
-| `NavigationMotion` | The motion of both components: `.expressive()`, a spring simulation, or `.standard()`, a duration and curve. |
+| `NavigationBar(...)` | The same arguments, plus `itemLayout`, `style` and `motion`. |
+| `NavigationRail(extended: ...)` | `expanded: ...` |
+| `NavigationRail(minExtendedWidth: ...)` | `minExpandedWidth: ...` |
+| `NavigationRail(labelType: ...)` | The same; it applies while the rail is collapsed, as an expanded rail always shows its labels. |
+| `NavigationRail(leadingAtTop:, trailingAtBottom:)` | `layout`, which places `leading` and `trailing` anywhere. |
+| `NavigationRailDestination(label: Text('Inbox'), disabled: true)` | `NavigationDestination(label: 'Inbox', enabled: false)` |
+| `NavigationRail.extendedAnimation(context)` | `NavigationRail.expandedAnimation(context)` |
+| `NavigationBarThemeData`, `NavigationRailThemeData` | `NavigationBarStyle`, `NavigationRailStyle` |
+
+## License
+
+MIT — see [LICENSE](LICENSE).
